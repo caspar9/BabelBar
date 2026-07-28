@@ -18,9 +18,15 @@ final class TranscriptionSession: ObservableObject {
     private var provider: StreamingTranscriptionProvider?
     private var pumpTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
+    private var silenceWatchdog: Task<Void, Never>?
     private var restartDebounce: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
     private var generation = 0
+
+    /// Auto-pause: peak s16 amplitude above this counts as sound (~ -40 dBFS).
+    private static let audibleThreshold: Int16 = 330
+    private static let silenceLimit: TimeInterval = 30
+    private var lastAudibleAt = Date()
 
     init(
         settings: SettingsStore,
@@ -86,6 +92,9 @@ final class TranscriptionSession: ObservableObject {
                 do {
                     for try await chunk in audioStream {
                         guard let self, self.generation == gen else { return }
+                        if chunk.peakSampleS16() > Self.audibleThreshold {
+                            self.lastAudibleAt = Date()
+                        }
                         await provider.sendAudio(chunk)
                     }
                 } catch {
@@ -93,6 +102,19 @@ final class TranscriptionSession: ObservableObject {
                     await self.stopSession(finalState: .error(
                         "Audio capture failed: \(error.localizedDescription)"
                     ))
+                }
+            }
+
+            lastAudibleAt = Date()
+            silenceWatchdog = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    guard let self, self.generation == gen else { return }
+                    if self.settings.autoPauseEnabled,
+                       Date().timeIntervalSince(self.lastAudibleAt) > Self.silenceLimit {
+                        await self.stopSession(finalState: .autoPaused)
+                        return
+                    }
                 }
             }
         } catch {
@@ -107,8 +129,10 @@ final class TranscriptionSession: ObservableObject {
         generation += 1
         pumpTask?.cancel()
         eventTask?.cancel()
+        silenceWatchdog?.cancel()
         pumpTask = nil
         eventTask = nil
+        silenceWatchdog = nil
 
         if let audioSource { await audioSource.stop() }
         if let provider { await provider.stop() }
@@ -146,6 +170,20 @@ final class TranscriptionSession: ObservableObject {
             guard let self, !Task.isCancelled, self.isRunning else { return }
             await self.stopSession(finalState: .restarting)
             await self.startSession()
+        }
+    }
+}
+
+private extension Data {
+    /// Peak absolute amplitude of pcm_s16le audio, for silence detection.
+    func peakSampleS16() -> Int16 {
+        withUnsafeBytes { raw in
+            var peak: Int16 = 0
+            for sample in raw.bindMemory(to: Int16.self) {
+                let magnitude = sample == .min ? .max : abs(sample)
+                if magnitude > peak { peak = magnitude }
+            }
+            return peak
         }
     }
 }

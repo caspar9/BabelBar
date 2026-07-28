@@ -2,12 +2,11 @@ import SwiftUI
 
 /// SwiftUI content of the glass overlay: scrollable caption history (each
 /// translated sentence directly under its original), hover controls (close /
-/// record / pin / settings), and a status footer for transient states.
+/// record / settings), and an icon-only status footer for transient states.
 struct OverlayContentView: View {
     @EnvironmentObject var session: TranscriptionSession
     @EnvironmentObject var captions: CaptionModel
     @EnvironmentObject var settings: SettingsStore
-    @EnvironmentObject var overlayState: OverlayState
 
     @State private var hovering = false
     @State private var showSettingsPopover = false
@@ -101,35 +100,38 @@ struct OverlayContentView: View {
         captions.segments.filter { !$0.isEmpty }
     }
 
-    // MARK: Status footer (pinned below the scroll area)
+    // MARK: Status footer — icon only; the tooltip carries the words
 
     @ViewBuilder
     private var statusFooter: some View {
-        if let (text, symbol) = footerContent {
-            Label(text, systemImage: symbol)
-                .font(.system(size: 11.5))
-                .foregroundStyle(.white.opacity(0.6))
-                .lineLimit(2)
+        if let (symbol, help, pulsing) = footerContent {
+            Image(systemName: symbol)
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.55))
+                .symbolEffect(.pulse, options: .repeating, isActive: pulsing)
+                .help(help)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
         }
     }
 
-    private var footerContent: (String, String)? {
+    private var footerContent: (symbol: String, help: String, pulsing: Bool)? {
         switch captions.state {
         case .idle:
-            return ("Captions stopped — hover and press the record button", "pause.circle")
+            return ("pause.circle", "Captions stopped", false)
         case .starting:
-            return ("Starting…", "ellipsis.circle")
+            return ("ellipsis.circle", "Starting…", true)
         case .running:
-            return visibleSegments.isEmpty ? ("Listening…", "waveform") : nil
+            return visibleSegments.isEmpty ? ("waveform", "Listening…", true) : nil
         case .reconnecting(let attempt):
-            return ("Reconnecting… (attempt \(attempt))", "wifi.exclamationmark")
+            return ("wifi.exclamationmark", "Reconnecting… (attempt \(attempt))", true)
         case .restarting:
-            return ("Restarting with new settings…", "arrow.triangle.2.circlepath")
+            return ("arrow.triangle.2.circlepath", "Restarting with new settings…", true)
+        case .autoPaused:
+            return ("moon.zzz", "Auto-paused after 30 s of silence", false)
         case .error(let message):
-            return (message, "exclamationmark.triangle")
+            return ("exclamationmark.triangle", message, false)
         }
     }
 
@@ -154,13 +156,6 @@ struct OverlayContentView: View {
                         .foregroundStyle(session.isRunning ? Color.red : Color.white.opacity(0.7))
                 }
                 .help(session.isRunning ? "Stop captions" : "Start captions")
-
-                Button {
-                    AppCoordinator.shared?.overlay?.setPinned(!overlayState.isPinned)
-                } label: {
-                    Image(systemName: overlayState.isPinned ? "pin.fill" : "pin")
-                }
-                .help(overlayState.isPinned ? "Unpin overlay" : "Pin overlay above everything")
 
                 Button {
                     showSettingsPopover.toggle()

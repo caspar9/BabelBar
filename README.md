@@ -19,8 +19,8 @@ No third-party dependencies; plain Swift Package Manager.
 ## First-time setup
 
 1. Launch the app — a `captions.bubble` icon appears in the menu bar (no Dock icon).
-2. Menu bar → **Settings… → Account**: paste your Soniox API key (stored in the
-   Keychain) and hit **Test Connection**.
+2. Menu bar → **Settings… → Account**: paste your Soniox API key and hit
+   **Test Connection**.
 3. Menu bar → **Start Captions**. On first start macOS asks for **Screen
    Recording** permission (needed for system-audio capture; no video is
    recorded). Enable BabelBar under *Privacy & Security → Screen & System
@@ -28,9 +28,9 @@ No third-party dependencies; plain Swift Package Manager.
 
 ## Usage
 
-- **Overlay**: drag anywhere by its background; resize from edges; position is
-  remembered. Hover to reveal the **pin** (keeps it above everything, incl.
-  full-screen apps) and **gear** (quick session settings) buttons.
+- **Overlay**: always stays on top (incl. full-screen apps); drag anywhere by
+  its background; resize from edges; position is remembered. Hover to reveal
+  the close, record, and gear (quick session settings) buttons.
 - **Captions**: original speech on top, translation below (default target:
   Chinese `zh`). Dimmer text is provisional and firms up as the recognizer
   finalizes it. With diarization on, each block gets a colored speaker chip.

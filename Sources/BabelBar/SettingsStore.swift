@@ -1,9 +1,8 @@
 import SwiftUI
 import Combine
 
-/// Single source of truth for user settings. The overlay popover and the
-/// Settings window both bind here. Session options are persisted in
-/// UserDefaults; the API key lives in the Keychain.
+/// Single source of truth for user settings, persisted in UserDefaults.
+/// The overlay popover and the Settings window both bind here.
 @MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
@@ -31,10 +30,16 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(targetLanguage, forKey: "targetLanguage") }
     }
 
-    // MARK: API key (Keychain-backed; never touches UserDefaults)
+    // MARK: API key
 
     @Published var apiKey: String {
-        didSet { Keychain.saveAPIKey(apiKey) }
+        didSet { defaults.set(apiKey, forKey: "apiKey") }
+    }
+
+    // MARK: Auto-pause
+
+    @Published var autoPauseEnabled: Bool {
+        didSet { defaults.set(autoPauseEnabled, forKey: "autoPauseEnabled") }
     }
 
     // MARK: Hotkeys (persisted key code + modifier flags)
@@ -53,7 +58,8 @@ final class SettingsStore: ObservableObject {
         endpointDetection = defaults.object(forKey: "endpointDetection") as? Bool ?? true
         translationEnabled = defaults.object(forKey: "translationEnabled") as? Bool ?? true
         targetLanguage = defaults.string(forKey: "targetLanguage") ?? "zh"
-        apiKey = Keychain.loadAPIKey()
+        apiKey = defaults.string(forKey: "apiKey") ?? ""
+        autoPauseEnabled = defaults.bool(forKey: "autoPauseEnabled")
         toggleAppShortcut = HotkeySpec.load(from: defaults, key: "hotkeyToggleApp")
             ?? HotkeySpec.defaultToggleApp
         toggleRecordingShortcut = HotkeySpec.load(from: defaults, key: "hotkeyToggleRecording")

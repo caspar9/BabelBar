@@ -1,20 +1,11 @@
 import AppKit
 import SwiftUI
 
-/// Overlay-wide UI state shared between the panel and its SwiftUI content.
-@MainActor
-final class OverlayState: ObservableObject {
-    @Published var isPinned = false
-    @Published var isVisible = false
-}
-
-/// Borderless, non-activating floating panel that hosts the caption view over a
-/// HUD glass background. Stays visible over full-screen apps and can be dragged
-/// anywhere by its background.
+/// Borderless, non-activating panel that hosts the caption view over a HUD
+/// glass background. Permanently pinned above everything (including
+/// full-screen apps) and draggable anywhere by its background.
 @MainActor
 final class OverlayPanelController: NSObject, NSWindowDelegate {
-    let overlayState = OverlayState()
-
     private let panel: NSPanel
     private let settings: SettingsStore
     private var frameSaveDebounce: Timer?
@@ -32,7 +23,7 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
         super.init()
 
         panel.isFloatingPanel = true
-        panel.level = .floating
+        panel.level = .statusBar  // always pinned on top
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isMovableByWindowBackground = true
         panel.backgroundColor = .clear
@@ -57,7 +48,6 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
             .environmentObject(session)
             .environmentObject(session.captions)
             .environmentObject(settings)
-            .environmentObject(overlayState)
         let hosting = NSHostingView(rootView: AnyView(content))
         hosting.translatesAutoresizingMaskIntoConstraints = false
         // Don't let SwiftUI's ideal size constrain the window: the panel is
@@ -78,27 +68,20 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    // MARK: Show / hide / pin
+    // MARK: Show / hide
 
     var isVisible: Bool { panel.isVisible }
 
     func show() {
         panel.orderFrontRegardless()
-        overlayState.isVisible = true
     }
 
     func hide() {
         panel.orderOut(nil)
-        overlayState.isVisible = false
     }
 
     func toggleVisible() {
         isVisible ? hide() : show()
-    }
-
-    func setPinned(_ pinned: Bool) {
-        overlayState.isPinned = pinned
-        panel.level = pinned ? .statusBar : .floating
     }
 
     private func centerNearBottom() {

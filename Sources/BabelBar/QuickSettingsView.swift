@@ -20,6 +20,11 @@ struct SessionOptionsForm: View {
                     .help("Split captions at natural utterance boundaries.")
             }
 
+            Section("Session") {
+                Toggle("Auto-pause after 30 s of silence", isOn: $settings.autoPauseEnabled)
+                    .help("Stops transcription automatically when no audio is playing, so silence doesn't burn API minutes.")
+            }
+
             Section("Translation") {
                 Toggle("Enable translation", isOn: $settings.translationEnabled)
                 if settings.translationEnabled {
@@ -84,6 +89,13 @@ struct QuickSettingsView: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 10)
         }
-        .frame(width: 340, height: 430)
+        .frame(width: 340, height: 480)
+        // The overlay control bar's styling (white foreground, 14 pt font,
+        // borderless buttons) leaks into this popover through the environment
+        // of its anchor view. Reset so the popover follows the system
+        // light/dark appearance instead of the dark overlay's.
+        .font(.body)
+        .foregroundStyle(Color.primary)
+        .buttonStyle(.automatic)
     }
 }

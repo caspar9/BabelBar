@@ -26,11 +26,12 @@ enum SessionState: Equatable {
     case running
     case reconnecting(attempt: Int)
     case restarting
+    case autoPaused
     case error(String)
 
     var isActive: Bool {
         switch self {
-        case .idle, .error: return false
+        case .idle, .autoPaused, .error: return false
         default: return true
         }
     }

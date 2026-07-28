@@ -34,7 +34,7 @@ private struct AccountTab: View {
             Section("Soniox API Key") {
                 SecureField("API key", text: $settings.apiKey, prompt: Text("sk-…"))
                     .textContentType(.password)
-                Text("Stored securely in the macOS Keychain. Get a key at soniox.com.")
+                Text("Get a key at soniox.com.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
