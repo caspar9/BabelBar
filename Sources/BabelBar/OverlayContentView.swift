@@ -1,9 +1,12 @@
 import SwiftUI
 
-/// SwiftUI content of the glass overlay: scrollable caption history (each
-/// translated sentence directly under its original), hover controls (close /
-/// record / settings), and an icon-only status footer for transient states.
+/// SwiftUI content of the glass overlay: a reserved top control row (never
+/// overlapping captions), scrollable caption history with each translated
+/// sentence directly under its original, and a status row that is icon-only
+/// except for errors, which show their text.
 struct OverlayContentView: View {
+    let model: AppModel
+
     @EnvironmentObject var session: TranscriptionSession
     @EnvironmentObject var captions: CaptionModel
     @EnvironmentObject var settings: SettingsStore
@@ -14,15 +17,11 @@ struct OverlayContentView: View {
     @State private var stickToBottom = true
 
     var body: some View {
-        ZStack(alignment: .top) {
-            VStack(spacing: 0) {
-                captionArea
-                statusFooter
-            }
-            if hovering || showSettingsPopover {
-                controlBar
-                    .transition(.opacity)
-            }
+        VStack(spacing: 0) {
+            controlRow
+                .frame(height: 30)
+            captionArea
+            statusRow
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.opacity(0.45))
@@ -33,6 +32,51 @@ struct OverlayContentView: View {
         .onHover { inside in
             withAnimation(.easeInOut(duration: 0.15)) { hovering = inside }
         }
+    }
+
+    // MARK: Control row (reserved space; buttons fade in on hover)
+
+    private var controlRow: some View {
+        HStack {
+            Button {
+                model.closeOverlayKeepingSession()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .help("Hide overlay (captions keep running)")
+            .accessibilityLabel("Hide overlay")
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                Button {
+                    session.toggle()
+                } label: {
+                    Image(systemName: session.isRunning ? "stop.circle.fill" : "record.circle")
+                        .foregroundStyle(session.isRunning ? Color.red : Color.white.opacity(0.7))
+                }
+                .help(session.isRunning ? "Stop captions" : "Start captions")
+                .accessibilityLabel(session.isRunning ? "Stop captions" : "Start captions")
+
+                Button {
+                    showSettingsPopover.toggle()
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .help("Quick settings")
+                .accessibilityLabel("Quick settings")
+                .popover(isPresented: $showSettingsPopover, arrowEdge: .bottom) {
+                    QuickSettingsView()
+                        .environmentObject(settings)
+                }
+            }
+        }
+        .font(.system(size: 14))
+        .buttonStyle(.borderless)
+        .foregroundStyle(.white.opacity(0.7))
+        .padding(.horizontal, 10)
+        .opacity(hovering || showSettingsPopover ? 1 : 0)
+        .animation(.easeInOut(duration: 0.15), value: hovering)
     }
 
     // MARK: Captions
@@ -54,7 +98,6 @@ struct OverlayContentView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16)
-                        .padding(.top, 12)
                         .padding(.bottom, 6)
                         .background(
                             GeometryReader { content in
@@ -89,6 +132,7 @@ struct OverlayContentView: View {
                         }
                         .buttonStyle(.plain)
                         .help("Jump to latest")
+                        .accessibilityLabel("Jump to latest captions")
                         .padding(10)
                     }
                 }
@@ -100,79 +144,80 @@ struct OverlayContentView: View {
         captions.segments.filter { !$0.isEmpty }
     }
 
-    // MARK: Status footer — icon only; the tooltip carries the words
+    // MARK: Status row — icon-only, except errors which must be readable
 
     @ViewBuilder
-    private var statusFooter: some View {
-        if let (symbol, help, pulsing) = footerContent {
-            Image(systemName: symbol)
-                .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.55))
-                .symbolEffect(.pulse, options: .repeating, isActive: pulsing)
-                .help(help)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
+    private var statusRow: some View {
+        if let status = statusContent {
+            HStack(spacing: 6) {
+                Image(systemName: status.symbol)
+                    .symbolEffect(.pulse, options: .repeating, isActive: status.pulsing)
+                if let text = status.text {
+                    Text(text).lineLimit(2)
+                }
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(status.isError ? .yellow.opacity(0.9) : .white.opacity(0.55))
+            .help(status.help)
+            .accessibilityLabel(status.help)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
         }
     }
 
-    private var footerContent: (symbol: String, help: String, pulsing: Bool)? {
-        switch captions.state {
+    private struct Status {
+        var symbol: String
+        var help: String
+        var pulsing = false
+        /// Errors show text inline; other states are icon-only with a tooltip.
+        var text: String?
+        var isError = false
+    }
+
+    private var statusContent: Status? {
+        switch session.state {
         case .idle:
-            return ("pause.circle", "Captions stopped", false)
+            return Status(symbol: "pause.circle", help: "Captions stopped")
         case .starting:
-            return ("ellipsis.circle", "Starting…", true)
+            return Status(symbol: "ellipsis.circle", help: "Starting…", pulsing: true)
         case .running:
-            return visibleSegments.isEmpty ? ("waveform", "Listening…", true) : nil
+            return visibleSegments.isEmpty
+                ? Status(symbol: "waveform", help: "Listening…", pulsing: true)
+                : nil
         case .reconnecting(let attempt):
-            return ("wifi.exclamationmark", "Reconnecting… (attempt \(attempt))", true)
+            return Status(
+                symbol: "wifi.exclamationmark",
+                help: "Reconnecting… (attempt \(attempt))",
+                pulsing: true
+            )
         case .restarting:
-            return ("arrow.triangle.2.circlepath", "Restarting with new settings…", true)
+            return Status(
+                symbol: "arrow.triangle.2.circlepath",
+                help: "Restarting with new settings…",
+                pulsing: true
+            )
         case .autoPaused:
-            return ("moon.zzz", "Auto-paused after 30 s of silence", false)
+            return Status(
+                symbol: "moon.zzz",
+                help: "Auto-paused after 30 s of silence",
+                text: "Auto-paused (silence)"
+            )
+        case .needsAPIKey:
+            return Status(
+                symbol: "key",
+                help: "Add your Soniox API key in Settings",
+                text: "Add your API key in Settings",
+                isError: true
+            )
         case .error(let message):
-            return ("exclamationmark.triangle", message, false)
+            return Status(
+                symbol: "exclamationmark.triangle",
+                help: message,
+                text: message,
+                isError: true
+            )
         }
-    }
-
-    // MARK: Hover controls
-
-    private var controlBar: some View {
-        HStack {
-            Button {
-                AppCoordinator.shared?.closeOverlay()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-            }
-            .help("Close overlay (stops captions)")
-
-            Spacer()
-
-            HStack(spacing: 8) {
-                Button {
-                    session.toggle()
-                } label: {
-                    Image(systemName: session.isRunning ? "stop.circle.fill" : "record.circle")
-                        .foregroundStyle(session.isRunning ? Color.red : Color.white.opacity(0.7))
-                }
-                .help(session.isRunning ? "Stop captions" : "Start captions")
-
-                Button {
-                    showSettingsPopover.toggle()
-                } label: {
-                    Image(systemName: "gearshape")
-                }
-                .help("Quick settings")
-                .popover(isPresented: $showSettingsPopover, arrowEdge: .bottom) {
-                    QuickSettingsView()
-                        .environmentObject(settings)
-                }
-            }
-        }
-        .font(.system(size: 14))
-        .buttonStyle(.borderless)
-        .foregroundStyle(.white.opacity(0.7))
-        .padding(8)
     }
 }
 
@@ -202,12 +247,14 @@ private struct SegmentView: View {
             (finalText(segment.originalFinal, size: 17, weight: .medium)
                 + partialText(segment.originalPartial, size: 17, weight: .medium))
                 .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
 
             if showTranslation && hasTranslation {
                 Divider().opacity(0.2)
                 (finalText(segment.translationFinal, size: 16, weight: .regular, opacity: 0.85)
                     + partialText(segment.translationPartial, size: 16, weight: .regular))
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
         }
         // History stays readable when scrolled back; the live block stands out.

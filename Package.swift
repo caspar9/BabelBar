@@ -10,6 +10,11 @@ let package = Package(
         .executableTarget(
             name: "BabelBar",
             path: "Sources/BabelBar"
+        ),
+        .testTarget(
+            name: "BabelBarTests",
+            dependencies: ["BabelBar"],
+            path: "Tests/BabelBarTests"
         )
     ]
 )

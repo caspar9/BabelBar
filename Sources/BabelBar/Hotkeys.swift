@@ -95,32 +95,63 @@ final class HotkeyManager {
 
 import SwiftUI
 
-/// Click, then press the desired combination; Esc cancels, ⌫ isn't captured as
-/// a shortcut. Captures keys with a local NSEvent monitor while recording.
+/// Shared coordinator so only one recorder captures keys at a time — starting
+/// a recording cancels any other active recorder.
+@MainActor
+final class ShortcutRecordingCoordinator: ObservableObject {
+    static let shared = ShortcutRecordingCoordinator()
+    @Published var activeRecorder: UUID?
+}
+
+/// Click, then press the desired combination; Esc cancels. A reset button
+/// restores the default. Captures keys with a local NSEvent monitor while
+/// recording.
 struct ShortcutRecorder: View {
     let title: String
+    let defaultSpec: HotkeySpec
     @Binding var spec: HotkeySpec
 
-    @State private var recording = false
+    @StateObject private var coordinator = ShortcutRecordingCoordinator.shared
+    @State private var id = UUID()
     @State private var monitor: Any?
+
+    private var recording: Bool { coordinator.activeRecorder == id }
 
     var body: some View {
         LabeledContent(title) {
-            Button {
-                recording ? endRecording() : beginRecording()
-            } label: {
-                Text(recording ? "Press keys…" : spec.display)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .frame(minWidth: 110)
+            HStack(spacing: 4) {
+                Button {
+                    recording ? endRecording() : beginRecording()
+                } label: {
+                    Text(recording ? "Press keys…" : spec.display)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .frame(minWidth: 110)
+                }
+                .buttonStyle(.bordered)
+                .tint(recording ? .accentColor : nil)
+                .accessibilityLabel("\(title) shortcut: \(spec.display)")
+
+                Button {
+                    endRecording()
+                    spec = defaultSpec
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .buttonStyle(.borderless)
+                .help("Reset to default (\(defaultSpec.display))")
+                .accessibilityLabel("Reset \(title) to default")
+                .disabled(spec == defaultSpec)
             }
-            .buttonStyle(.bordered)
-            .tint(recording ? .accentColor : nil)
+        }
+        .onChange(of: coordinator.activeRecorder) { _, active in
+            // Another recorder took over — drop this one's monitor.
+            if active != id { removeMonitor() }
         }
         .onDisappear { endRecording() }
     }
 
     private func beginRecording() {
-        recording = true
+        coordinator.activeRecorder = id
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             defer { endRecording() }
             if event.keyCode == UInt16(kVK_Escape) { return nil }
@@ -132,7 +163,13 @@ struct ShortcutRecorder: View {
     }
 
     private func endRecording() {
-        recording = false
+        if recording {
+            coordinator.activeRecorder = nil
+        }
+        removeMonitor()
+    }
+
+    private func removeMonitor() {
         if let monitor {
             NSEvent.removeMonitor(monitor)
         }

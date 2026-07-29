@@ -1,16 +1,19 @@
 import SwiftUI
 
-/// One sentence/utterance block shown in the overlay: an original sentence and
-/// its translation, kept together so scrolling back always shows the pair.
+/// One sentence block shown in the overlay: an original sentence and its
+/// translation, kept together so scrolling back always shows the pair.
 struct CaptionSegment: Identifiable, Equatable {
     let id: UUID
-    var originalFinal: String = ""
-    var originalPartial: String = ""
-    var translationFinal: String = ""
-    var translationPartial: String = ""
+    var originalFinal = ""
+    var originalPartial = ""
+    var translationFinal = ""
+    var translationPartial = ""
     var speaker: String?
-    /// Closed blocks receive no further tokens.
-    var isClosed: Bool = false
+    /// An utterance boundary passed — the original text is complete, but the
+    /// block may stay open a little longer for its trailing translation.
+    var originalSealed = false
+    /// Fully complete (original + translation); receives no further tokens.
+    var isClosed = false
 
     init(id: UUID = UUID()) { self.id = id }
 
@@ -20,36 +23,22 @@ struct CaptionSegment: Identifiable, Equatable {
     }
 }
 
-enum SessionState: Equatable {
-    case idle
-    case starting
-    case running
-    case reconnecting(attempt: Int)
-    case restarting
-    case autoPaused
-    case error(String)
-
-    var isActive: Bool {
-        switch self {
-        case .idle, .autoPaused, .error: return false
-        default: return true
-        }
-    }
-}
-
-/// Turns provider-neutral `TranscriptEvent`s into renderable caption blocks.
+/// Turns transcript events into renderable caption blocks. Owns only caption
+/// content — session state lives on `TranscriptionSession`.
 ///
 /// Blocks are split per sentence so each translated sentence sits directly
-/// under its original. Because translation tokens trail the original by a few
-/// hundred ms, a block whose original sentence is complete stays open until its
+/// under its original. Translation tokens trail the original by up to a couple
+/// of seconds, so a block whose original is complete stays open until its
 /// translation is complete too; original tokens for the next sentence open a
-/// new block in the meantime. Final text is committed and immutable; partial
-/// text is replaced wholesale on every event.
+/// new block in the meantime. Because translations can also trail an utterance
+/// endpoint, `<end>` only *seals* open blocks (no more original text) — they
+/// close when their translation completes, or at the latest at the next
+/// endpoint. Final text is committed and immutable; partial text is replaced
+/// wholesale on every event.
 @MainActor
 final class CaptionModel: ObservableObject {
     /// Scrollback history plus open blocks; the last element is the live block.
-    @Published private(set) var segments: [CaptionSegment] = [CaptionSegment()]
-    @Published var state: SessionState = .idle
+    @Published private(set) var segments = [CaptionSegment()]
 
     /// Set by the session when translation is on, so a block waits for its
     /// translation before closing.
@@ -65,31 +54,22 @@ final class CaptionModel: ObservableObject {
 
     func apply(_ event: TranscriptEvent) {
         switch event {
-        case .connected:
-            state = .running
-
         case .partial(let tokens):
             applyPartials(tokens)
-
         case .final(let tokens):
             applyFinals(tokens)
-
         case .utteranceEnd:
-            closeAllOpenBlocks()
-
+            handleUtteranceEnd()
         case .speakerChange(let speaker):
-            closeAllOpenBlocks()
+            handleUtteranceEnd()
             segments[liveIndex].speaker = speaker
-
-        case .reconnecting(let attempt):
-            state = .reconnecting(attempt: attempt)
-
-        case .finished:
+        case .reconnecting:
+            // Provisional tokens from the dead connection will never finalize.
             clearPartials()
-            closeAllOpenBlocks()
-
-        case .error(let err):
-            state = .error(err.message)
+        case .finished:
+            forceCloseAll()
+        case .connected, .error:
+            break  // session-state events; handled by TranscriptionSession
         }
     }
 
@@ -99,10 +79,11 @@ final class CaptionModel: ObservableObject {
         for token in tokens {
             switch token.kind {
             case .original:
-                // A finished sentence means new original text starts a new block;
-                // the old one may still be waiting for its translation.
-                if !segments[liveIndex].isEmpty,
-                   Self.endsSentence(segments[liveIndex].originalFinal) {
+                // A block whose original sentence is done (sealed, or ended
+                // with terminal punctuation) takes no more original text —
+                // the next sentence opens a new block.
+                if segments[liveIndex].originalSealed
+                    || Self.endsSentence(segments[liveIndex].originalFinal) {
                     segments[liveIndex].originalPartial = ""
                     segments.append(CaptionSegment())
                 }
@@ -135,26 +116,26 @@ final class CaptionModel: ObservableObject {
     }
 
     /// Translation trails the original, so it belongs to the oldest open block
-    /// that already has original text.
+    /// that has original text and whose translation is still incomplete.
     private func translationTargetIndex() -> Int {
-        for (idx, seg) in segments.enumerated() {
-            if !seg.isClosed && !seg.originalFinal.isEmpty
-                && !Self.endsSentence(seg.translationFinal) {
-                return idx
-            }
+        for (idx, seg) in segments.enumerated()
+        where !seg.isClosed && !seg.originalFinal.isEmpty
+            && !Self.endsSentence(seg.translationFinal) {
+            return idx
         }
         return liveIndex
     }
 
     // MARK: Block lifecycle
 
-    /// A block is done when its original sentence is complete and — if
-    /// translation is expected — the translation is complete as well.
+    /// A block closes when its original is done (terminal punctuation or
+    /// sealed by an endpoint) and — if translation is expected — the
+    /// translation is complete as well.
     private func closeCompletedBlocks() {
         for idx in segments.indices {
             let seg = segments[idx]
             guard !seg.isClosed, !seg.originalFinal.isEmpty else { continue }
-            let originalDone = Self.endsSentence(seg.originalFinal)
+            let originalDone = seg.originalSealed || Self.endsSentence(seg.originalFinal)
             let translationDone = !expectsTranslation || Self.endsSentence(seg.translationFinal)
             if originalDone && translationDone {
                 segments[idx].isClosed = true
@@ -162,25 +143,39 @@ final class CaptionModel: ObservableObject {
                 segments[idx].translationPartial = ""
             }
         }
-        if segments[liveIndex].isClosed {
-            segments.append(CaptionSegment())
-        }
+        ensureOpenLive()
     }
 
-    /// Forced boundary (endpoint `<end>`, speaker change, session end): the
-    /// provider has already finalized pending tokens, so stale partials are
-    /// dropped and every open block is sealed as-is.
-    private func closeAllOpenBlocks() {
+    /// Endpoint boundary. Blocks sealed at an *earlier* endpoint have had a
+    /// full utterance of time for their translation to arrive — close them
+    /// as-is so nothing can stay stuck open. Blocks from the utterance that
+    /// just ended are sealed but stay open for their trailing translation.
+    private func handleUtteranceEnd() {
         clearPartials()
-        for idx in segments.indices where !segments[idx].isClosed {
-            if segments[idx].isEmpty {
-                segments.remove(at: idx)
-                break  // only the live block can be empty
+        for idx in segments.indices where !segments[idx].isClosed && !segments[idx].isEmpty {
+            if segments[idx].originalSealed {
+                segments[idx].isClosed = true
+            } else {
+                segments[idx].originalSealed = true
             }
+        }
+        closeCompletedBlocks()
+        trimHistory()
+    }
+
+    /// Session over — nothing more will arrive; close everything.
+    private func forceCloseAll() {
+        clearPartials()
+        for idx in segments.indices where !segments[idx].isEmpty {
             segments[idx].isClosed = true
         }
-        segments.append(CaptionSegment())
-        trimHistory()
+        ensureOpenLive()
+    }
+
+    private func ensureOpenLive() {
+        if segments.isEmpty || segments[liveIndex].isClosed || segments[liveIndex].originalSealed {
+            segments.append(CaptionSegment())
+        }
     }
 
     private func clearPartials() {
@@ -193,7 +188,7 @@ final class CaptionModel: ObservableObject {
     private func trimHistory() {
         let overflow = segments.count - maxSegments
         guard overflow > 0 else { return }
-        // Never drop open blocks; they are always at the tail.
+        // Only drop closed history; open blocks still receive tokens.
         let removable = min(overflow, segments.prefix(while: \.isClosed).count)
         segments.removeFirst(removable)
     }

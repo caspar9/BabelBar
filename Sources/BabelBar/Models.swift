@@ -35,6 +35,29 @@ struct TranscriptionError: Error, Equatable, Sendable {
     var isRecoverable: Bool = false
 }
 
+/// Single source of truth for the session's lifecycle state, owned by
+/// `TranscriptionSession`. Every UI surface (menu bar, overlay) derives
+/// from this one value.
+enum SessionState: Equatable, Sendable {
+    case idle
+    case starting
+    case running
+    case reconnecting(attempt: Int)
+    case restarting
+    case autoPaused
+    /// No API key configured; the UI should route the user to Settings.
+    case needsAPIKey
+    case error(String)
+
+    /// A session is in progress (audio flowing or trying to resume).
+    var isActive: Bool {
+        switch self {
+        case .starting, .running, .reconnecting, .restarting: return true
+        case .idle, .autoPaused, .needsAPIKey, .error: return false
+        }
+    }
+}
+
 /// Provider-neutral session configuration.
 struct TranscriptionConfig: Equatable, Sendable {
     var apiKey: String

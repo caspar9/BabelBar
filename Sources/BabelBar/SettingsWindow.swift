@@ -13,7 +13,8 @@ struct SettingsRootView: View {
             ShortcutsTab()
                 .tabItem { Label("Shortcuts", systemImage: "keyboard") }
         }
-        .frame(width: 480, height: 420)
+        .frame(width: 480)
+        .frame(minHeight: 380, idealHeight: 440)
     }
 }
 
@@ -91,10 +92,12 @@ private struct ShortcutsTab: View {
             Section("Global Shortcuts") {
                 ShortcutRecorder(
                     title: "Toggle app (overlay + captions)",
+                    defaultSpec: .defaultToggleApp,
                     spec: $settings.toggleAppShortcut
                 )
                 ShortcutRecorder(
                     title: "Start/Stop recording",
+                    defaultSpec: .defaultToggleRecording,
                     spec: $settings.toggleRecordingShortcut
                 )
             }

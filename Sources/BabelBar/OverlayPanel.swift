@@ -10,12 +10,12 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
     private let settings: SettingsStore
     private var frameSaveDebounce: Timer?
 
-    init(session: TranscriptionSession, settings: SettingsStore) {
+    init(model: AppModel, session: TranscriptionSession, settings: SettingsStore) {
         self.settings = settings
 
         let defaultFrame = NSRect(x: 0, y: 0, width: 640, height: 140)
         panel = NSPanel(
-            contentRect: settings.loadOverlayFrame() ?? defaultFrame,
+            contentRect: Self.validatedFrame(settings.loadOverlayFrame()) ?? defaultFrame,
             styleMask: [.borderless, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
@@ -44,7 +44,7 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
         effect.state = .active
         effect.maskImage = .roundedCornerMask(radius: 16)
 
-        let content = OverlayContentView()
+        let content = OverlayContentView(model: model)
             .environmentObject(session)
             .environmentObject(session.captions)
             .environmentObject(settings)
@@ -63,7 +63,7 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
         ])
         panel.contentView = effect
 
-        if settings.loadOverlayFrame() == nil {
+        if Self.validatedFrame(settings.loadOverlayFrame()) == nil {
             centerNearBottom()
         }
     }
@@ -80,8 +80,18 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
         panel.orderOut(nil)
     }
 
-    func toggleVisible() {
-        isVisible ? hide() : show()
+    // MARK: Frame persistence
+
+    /// A saved frame is only restored if it is still meaningfully on some
+    /// screen — otherwise (display unplugged, resolution changed) fall back
+    /// to the default position.
+    private static func validatedFrame(_ frame: NSRect?) -> NSRect? {
+        guard let frame else { return nil }
+        let visible = NSScreen.screens.contains { screen in
+            let overlap = screen.visibleFrame.intersection(frame)
+            return overlap.width >= 100 && overlap.height >= 50
+        }
+        return visible ? frame : nil
     }
 
     private func centerNearBottom() {
