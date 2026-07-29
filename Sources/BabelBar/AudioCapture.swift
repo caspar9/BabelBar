@@ -1,20 +1,21 @@
-import AVFoundation
 import AppKit
 import CoreMedia
 import ScreenCaptureKit
 
 /// Captures macOS system audio (not the microphone) via ScreenCaptureKit and
 /// emits 16 kHz mono s16le PCM in ~120 ms chunks.
+///
+/// Concurrency: every mutable field is confined to `audioQueue` — the SCStream
+/// callback already runs there, and `start()`/`stop()` hop onto it — so there
+/// are no cross-thread races on the continuation or chunk buffer.
 final class SystemAudioSource: NSObject, AudioSource, SCStreamDelegate, SCStreamOutput {
-    private let audioQueue = DispatchQueue(label: "com.babelbar.audio")
+    private let audioQueue = DispatchQueue(label: "com.babelbar.app.audio")
+
+    // Confined to audioQueue.
     private var stream: SCStream?
     private var continuation: AsyncThrowingStream<Data, Error>.Continuation?
-
-    private let targetFormat = AVAudioFormat(
-        commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true
-    )!
-    private var converter: AVAudioConverter?
     private var pending = Data()
+
     /// 16 000 samples/s × 2 bytes × 0.12 s
     private let chunkBytes = 3_840
 
@@ -28,8 +29,10 @@ final class SystemAudioSource: NSObject, AudioSource, SCStreamDelegate, SCStream
         let config = SCStreamConfiguration()
         config.capturesAudio = true
         config.excludesCurrentProcessAudio = true
-        config.sampleRate = 48_000
-        config.channelCount = 2
+        // ScreenCaptureKit resamples and downmixes for us; only the
+        // float32 → int16 sample-format conversion is left to do.
+        config.sampleRate = 16_000
+        config.channelCount = 1
         // Video output is never attached; shrink it to the minimum anyway.
         config.width = 2
         config.height = 2
@@ -37,82 +40,85 @@ final class SystemAudioSource: NSObject, AudioSource, SCStreamDelegate, SCStream
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-        try await stream.startCapture()
-        self.stream = stream
 
+        let (dataStream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
         audioQueue.sync {
-            converter = nil
-            pending.removeAll()
+            self.stream = stream
+            self.continuation = continuation
+            self.pending.removeAll()
         }
 
-        return AsyncThrowingStream { continuation in
-            self.continuation = continuation
+        do {
+            try await stream.startCapture()
+        } catch {
+            audioQueue.sync {
+                self.stream = nil
+                self.continuation = nil
+            }
+            throw error
         }
+        Log.audio.info("System audio capture started")
+        return dataStream
     }
 
     func stop() async {
+        let stream = audioQueue.sync { self.stream }
         if let stream {
             try? await stream.stopCapture()
         }
-        stream = nil
         audioQueue.sync {
             if !pending.isEmpty {
                 continuation?.yield(pending)
                 pending.removeAll()
             }
+            continuation?.finish()
+            continuation = nil
+            self.stream = nil
         }
-        continuation?.finish()
-        continuation = nil
+        Log.audio.info("System audio capture stopped")
     }
 
-    // MARK: SCStreamOutput
+    // MARK: SCStreamOutput (runs on audioQueue)
 
     func stream(
         _ stream: SCStream,
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        guard type == .audio, sampleBuffer.isValid else { return }
-        guard let formatDesc = sampleBuffer.formatDescription else { return }
-        let sourceFormat = AVAudioFormat(cmAudioFormatDescription: formatDesc)
-
-        if converter == nil || converter?.inputFormat != sourceFormat {
-            converter = AVAudioConverter(from: sourceFormat, to: targetFormat)
-        }
-        guard let converter else { return }
+        guard type == .audio, sampleBuffer.isValid, continuation != nil else { return }
+        guard let asbd = sampleBuffer.formatDescription?.audioStreamBasicDescription
+        else { return }
 
         try? sampleBuffer.withAudioBufferList { bufferList, _ in
-            guard let input = AVAudioPCMBuffer(
-                pcmFormat: sourceFormat, bufferListNoCopy: bufferList.unsafePointer
-            ) else { return }
-            convertAndEmit(input, using: converter, sourceRate: sourceFormat.sampleRate)
+            let buffers = bufferList.unsafePointer.pointee.mBuffers
+            guard let base = buffers.mData else { return }
+            let byteCount = Int(buffers.mDataByteSize)
+
+            if asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
+                appendConverted(
+                    floats: base.bindMemory(to: Float32.self, capacity: byteCount / 4),
+                    count: byteCount / 4
+                )
+            } else if asbd.mBitsPerChannel == 16 {
+                pending.append(Data(bytes: base, count: byteCount))
+            } else {
+                Log.audio.warning("Unexpected audio format: \(asbd.mFormatID) \(asbd.mBitsPerChannel)-bit")
+                return
+            }
+            emitChunks()
         }
     }
 
-    private func convertAndEmit(
-        _ input: AVAudioPCMBuffer, using converter: AVAudioConverter, sourceRate: Double
-    ) {
-        let ratio = targetFormat.sampleRate / sourceRate
-        let capacity = AVAudioFrameCount(Double(input.frameLength) * ratio) + 64
-        guard let output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)
-        else { return }
-
-        var consumed = false
-        var conversionError: NSError?
-        let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
-            if consumed {
-                inputStatus.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            inputStatus.pointee = .haveData
-            return input
+    private func appendConverted(floats: UnsafePointer<Float32>, count: Int) {
+        var samples = [Int16](repeating: 0, count: count)
+        for i in 0..<count {
+            let clamped = max(-1.0, min(1.0, floats[i]))
+            samples[i] = Int16(clamped * Float32(Int16.max))
         }
-        guard status != .error, output.frameLength > 0,
-              let samples = output.int16ChannelData
-        else { return }
+        samples.withUnsafeBytes { pending.append(contentsOf: $0) }
+    }
 
-        pending.append(Data(bytes: samples[0], count: Int(output.frameLength) * 2))
+    private func emitChunks() {
         while pending.count >= chunkBytes {
             continuation?.yield(pending.prefix(chunkBytes))
             pending.removeFirst(chunkBytes)
@@ -122,12 +128,15 @@ final class SystemAudioSource: NSObject, AudioSource, SCStreamDelegate, SCStream
     // MARK: SCStreamDelegate
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        continuation?.finish(throwing: TranscriptionError(
-            message: "Audio capture stopped: \(error.localizedDescription)",
-            isRecoverable: true
-        ))
-        continuation = nil
-        self.stream = nil
+        Log.audio.error("Capture stopped with error: \(error.localizedDescription)")
+        audioQueue.async {
+            self.continuation?.finish(throwing: TranscriptionError(
+                message: "Audio capture stopped: \(error.localizedDescription)",
+                isRecoverable: true
+            ))
+            self.continuation = nil
+            self.stream = nil
+        }
     }
 }
 
@@ -135,8 +144,9 @@ final class SystemAudioSource: NSObject, AudioSource, SCStreamDelegate, SCStream
 
 @MainActor
 enum ScreenRecordingPermission {
-    /// Returns true if capture is authorized. On first denial, explains why the
-    /// permission is needed and offers to open System Settings.
+    /// Returns true if capture is authorized. Otherwise explains why the
+    /// permission is needed, then triggers exactly one system surface: the
+    /// one-time system prompt on first request, or the privacy pane after.
     static func ensure() -> Bool {
         if CGPreflightScreenCaptureAccess() { return true }
 
@@ -149,17 +159,21 @@ enum ScreenRecordingPermission {
 
         No video is recorded and nothing is stored.
 
-        Click "Open System Settings", enable BabelBar under \
-        Privacy & Security → Screen & System Audio Recording, then start \
-        captions again.
+        Enable BabelBar under Privacy & Security → Screen & System Audio \
+        Recording, then start captions again.
         """
-        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
 
-        if alert.runModal() == .alertFirstButtonReturn {
-            // Registers the app in the Screen Recording list and shows the system prompt.
+        // The system's own permission prompt appears at most once per app;
+        // after that the only path is the privacy pane.
+        let requestedKey = "requestedScreenCapture"
+        if !UserDefaults.standard.bool(forKey: requestedKey) {
+            UserDefaults.standard.set(true, forKey: requestedKey)
             CGRequestScreenCaptureAccess()
+        } else {
             let pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
             if let url = URL(string: pane) {
                 NSWorkspace.shared.open(url)

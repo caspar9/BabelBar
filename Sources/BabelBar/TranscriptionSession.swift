@@ -2,13 +2,16 @@ import Foundation
 import Combine
 
 /// Coordinator: pumps `AudioSource` audio into a `StreamingTranscriptionProvider`
-/// and provider events into the `CaptionModel`. Owns session lifecycle,
-/// including graceful restarts when settings change mid-session.
+/// and provider events into the `CaptionModel`. Owns the session lifecycle and
+/// the single `state` value every UI surface derives from. Knows nothing about
+/// windows or views.
 @MainActor
 final class TranscriptionSession: ObservableObject {
     let captions = CaptionModel()
 
-    @Published private(set) var isRunning = false
+    @Published private(set) var state: SessionState = .idle
+
+    var isRunning: Bool { state.isActive }
 
     private let settings: SettingsStore
     private let makeAudioSource: () -> AudioSource
@@ -25,8 +28,11 @@ final class TranscriptionSession: ObservableObject {
 
     /// Auto-pause: peak s16 amplitude above this counts as sound (~ -40 dBFS).
     private static let audibleThreshold: Int16 = 330
-    private static let silenceLimit: TimeInterval = 30
-    private var lastAudibleAt = Date()
+    private static let silenceLimit: Duration = .seconds(30)
+    /// Monotonic clock — wall-clock Date would jump across system sleep and
+    /// fire a spurious auto-pause on wake.
+    private let clock = ContinuousClock()
+    private var lastAudibleAt: ContinuousClock.Instant
 
     init(
         settings: SettingsStore,
@@ -36,6 +42,7 @@ final class TranscriptionSession: ObservableObject {
         self.settings = settings
         self.makeAudioSource = makeAudioSource
         self.makeProvider = makeProvider
+        self.lastAudibleAt = clock.now
         observeSettings()
     }
 
@@ -44,8 +51,7 @@ final class TranscriptionSession: ObservableObject {
     func start() {
         guard !isRunning else { return }
         guard !settings.apiKey.isEmpty else {
-            captions.state = .error("Add your Soniox API key in Settings first.")
-            AppCoordinator.shared?.openSettingsWindow()
+            state = .needsAPIKey
             return
         }
         guard ScreenRecordingPermission.ensure() else { return }
@@ -64,10 +70,10 @@ final class TranscriptionSession: ObservableObject {
     private func startSession() async {
         generation += 1
         let gen = generation
-        isRunning = true
         captions.reset()
         captions.expectsTranslation = settings.transcriptionConfig.translationTarget != nil
-        captions.state = .starting
+        state = .starting
+        Log.session.info("Starting session")
 
         let audioSource = makeAudioSource()
         let provider = makeProvider()
@@ -79,12 +85,12 @@ final class TranscriptionSession: ObservableObject {
             let audioStream = try await audioSource.start()
             guard gen == generation else { return }
 
-            captions.state = .running
+            state = .running
 
             eventTask = Task { [weak self] in
                 for await event in eventStream {
                     guard let self, self.generation == gen else { return }
-                    self.captions.apply(event)
+                    self.handle(event)
                 }
             }
 
@@ -93,7 +99,7 @@ final class TranscriptionSession: ObservableObject {
                     for try await chunk in audioStream {
                         guard let self, self.generation == gen else { return }
                         if chunk.peakSampleS16() > Self.audibleThreshold {
-                            self.lastAudibleAt = Date()
+                            self.lastAudibleAt = self.clock.now
                         }
                         await provider.sendAudio(chunk)
                     }
@@ -105,13 +111,14 @@ final class TranscriptionSession: ObservableObject {
                 }
             }
 
-            lastAudibleAt = Date()
+            lastAudibleAt = clock.now
             silenceWatchdog = Task { [weak self] in
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    try? await Task.sleep(for: .seconds(2))
                     guard let self, self.generation == gen else { return }
                     if self.settings.autoPauseEnabled,
-                       Date().timeIntervalSince(self.lastAudibleAt) > Self.silenceLimit {
+                       self.clock.now - self.lastAudibleAt > Self.silenceLimit {
+                        Log.session.info("Auto-pausing after silence")
                         await self.stopSession(finalState: .autoPaused)
                         return
                     }
@@ -119,10 +126,25 @@ final class TranscriptionSession: ObservableObject {
             }
         } catch {
             guard gen == generation else { return }
+            Log.session.error("Session start failed: \(error.localizedDescription)")
             await stopSession(finalState: .error(
                 "Could not start: \(error.localizedDescription)"
             ))
         }
+    }
+
+    private func handle(_ event: TranscriptEvent) {
+        switch event {
+        case .connected:
+            state = .running
+        case .reconnecting(let attempt):
+            state = .reconnecting(attempt: attempt)
+        case .error(let err):
+            state = .error(err.message)
+        default:
+            break
+        }
+        captions.apply(event)
     }
 
     private func stopSession(finalState: SessionState) async {
@@ -139,34 +161,36 @@ final class TranscriptionSession: ObservableObject {
         audioSource = nil
         provider = nil
 
-        isRunning = false
-        captions.state = finalState
+        state = finalState
+        Log.session.info("Session stopped")
     }
 
     // MARK: Settings-change restart
 
     private func observeSettings() {
         let s = settings
-        Publishers.MergeMany(
-            s.$languageHints.map { _ in () }.eraseToAnyPublisher(),
-            s.$strictLanguageHints.map { _ in () }.eraseToAnyPublisher(),
-            s.$speakerDiarization.map { _ in () }.eraseToAnyPublisher(),
-            s.$endpointDetection.map { _ in () }.eraseToAnyPublisher(),
-            s.$translationEnabled.map { _ in () }.eraseToAnyPublisher(),
-            s.$targetLanguage.map { _ in () }.eraseToAnyPublisher()
-        )
-        .dropFirst(6)  // skip the initial replay of each publisher
-        .sink { [weak self] in self?.scheduleRestart() }
-        .store(in: &cancellables)
+        // dropFirst() per publisher skips each one's initial replay without
+        // depending on how many publishers are merged here.
+        let changes: [AnyPublisher<Void, Never>] = [
+            s.$languageHints.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            s.$strictLanguageHints.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            s.$speakerDiarization.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            s.$endpointDetection.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            s.$translationEnabled.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            s.$targetLanguage.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+        ]
+        Publishers.MergeMany(changes)
+            .sink { [weak self] in self?.scheduleRestart() }
+            .store(in: &cancellables)
     }
 
     /// Debounced so toggling several options at once restarts a single time.
     private func scheduleRestart() {
         guard isRunning else { return }
-        captions.state = .restarting
+        state = .restarting
         restartDebounce?.cancel()
         restartDebounce = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            try? await Task.sleep(for: .milliseconds(700))
             guard let self, !Task.isCancelled, self.isRunning else { return }
             await self.stopSession(finalState: .restarting)
             await self.startSession()

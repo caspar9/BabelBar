@@ -8,21 +8,32 @@ actor SonioxProvider: StreamingTranscriptionProvider {
     private static let endpoint = URL(string: "wss://stt-rt.soniox.com/transcribe-websocket")!
     private static let model = "stt-rt-v5"
     private static let maxReconnectAttempts = 5
+    /// How long stop() waits for the server's `finished` acknowledgment.
+    private static let drainTimeout: Duration = .seconds(3)
 
-    private let urlSession = URLSession(configuration: .default)
+    /// Shared across sessions — URLSessions are expensive and must be
+    /// explicitly invalidated if per-instance, so keep one for the app.
+    private static let urlSession = URLSession(configuration: .default)
+
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var events: AsyncStream<TranscriptEvent>.Continuation?
     private var config: TranscriptionConfig?
     private var stopping = false
+    private var finished = false
+    private var finishWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastSpeaker: String?
+    /// Incremented per start(); keeps stale timeout tasks from touching a new session.
+    private var epoch = 0
 
     // MARK: StreamingTranscriptionProvider
 
     func start(config: TranscriptionConfig) async throws -> AsyncStream<TranscriptEvent> {
         self.config = config
-        self.stopping = false
-        self.lastSpeaker = nil
+        stopping = false
+        finished = false
+        lastSpeaker = nil
+        epoch += 1
 
         let (stream, continuation) = AsyncStream.makeStream(of: TranscriptEvent.self)
         events = continuation
@@ -48,23 +59,50 @@ actor SonioxProvider: StreamingTranscriptionProvider {
         stopping = true
         if let socket {
             // Empty string signals end-of-audio; the server flushes remaining
-            // tokens and replies with `finished`.
+            // tokens and replies with `finished` — wait for that (with a
+            // timeout) instead of sleeping a fixed interval.
             try? await socket.send(.string(""))
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await waitForFinished(timeout: Self.drainTimeout)
         }
         teardown()
         events?.finish()
         events = nil
     }
 
+    // MARK: Finished handshake
+
+    private func waitForFinished(timeout: Duration) async {
+        guard !finished else { return }
+        let currentEpoch = epoch
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            finishWaiters.append(cont)
+            Task {
+                try? await Task.sleep(for: timeout)
+                if self.epoch == currentEpoch {
+                    Log.stt.warning("Timed out waiting for server drain")
+                    self.signalFinished()
+                }
+            }
+        }
+    }
+
+    private func signalFinished() {
+        finished = true
+        for waiter in finishWaiters {
+            waiter.resume()
+        }
+        finishWaiters.removeAll()
+    }
+
     // MARK: Connection
 
     private func connect(config: TranscriptionConfig) async throws {
-        let socket = urlSession.webSocketTask(with: Self.endpoint)
+        let socket = Self.urlSession.webSocketTask(with: Self.endpoint)
         socket.resume()
         self.socket = socket
 
         try await socket.send(.string(configJSON(for: config)))
+        Log.stt.info("Connected to Soniox")
 
         receiveTask = Task { [weak self] in
             await self?.receiveLoop(socket: socket)
@@ -111,7 +149,14 @@ actor SonioxProvider: StreamingTranscriptionProvider {
                     if handle(responseText: text) { return }  // finished/fatal
                 }
             } catch {
-                guard self.socket === socket, !stopping else { return }
+                guard self.socket === socket else { return }
+                if stopping {
+                    // Connection dropped while draining — nothing more will
+                    // arrive; unblock stop().
+                    signalFinished()
+                    return
+                }
+                Log.stt.warning("WebSocket receive failed: \(error.localizedDescription)")
                 await reconnect()
                 return
             }
@@ -126,7 +171,9 @@ actor SonioxProvider: StreamingTranscriptionProvider {
 
         if let code = obj["error_code"] as? Int {
             let message = obj["error_message"] as? String ?? "Unknown Soniox error"
+            Log.stt.error("Soniox error \(code): \(message)")
             events?.yield(.error(TranscriptionError(message: "Soniox error \(code): \(message)")))
+            signalFinished()
             teardown()
             return true
         }
@@ -136,7 +183,9 @@ actor SonioxProvider: StreamingTranscriptionProvider {
         }
 
         if obj["finished"] as? Bool == true {
+            Log.stt.info("Server acknowledged end of session")
             events?.yield(.finished)
+            signalFinished()
             teardown()
             return true
         }
@@ -212,8 +261,9 @@ actor SonioxProvider: StreamingTranscriptionProvider {
         for attempt in 1...Self.maxReconnectAttempts {
             guard !stopping else { return }
             events?.yield(.reconnecting(attempt: attempt))
+            Log.stt.info("Reconnecting, attempt \(attempt)")
             let delay = min(16.0, pow(2.0, Double(attempt - 1)))  // 1, 2, 4, 8, 16 s
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            try? await Task.sleep(for: .seconds(delay))
             guard !stopping else { return }
             do {
                 try await connect(config: config)
@@ -224,6 +274,7 @@ actor SonioxProvider: StreamingTranscriptionProvider {
                 continue
             }
         }
+        Log.stt.error("Reconnect attempts exhausted")
         events?.yield(.error(TranscriptionError(
             message: "Connection lost — could not reconnect to the transcription service."
         )))
@@ -233,8 +284,10 @@ actor SonioxProvider: StreamingTranscriptionProvider {
 // MARK: - Connection test (Settings → Account)
 
 enum SonioxConnectionTest {
-    /// Opens a short-lived WebSocket handshake with the given key and reports
-    /// whether Soniox accepts the config.
+    /// Full short-lived handshake: connect, stream ~300 ms of silence, signal
+    /// end-of-audio, and wait for the server's `finished` acknowledgment.
+    /// (Sending end-of-audio with zero audio bytes makes the server reply
+    /// "error 400: No audio received", so the silence burst is required.)
     static func run(apiKey: String) async -> Result<Void, TranscriptionError> {
         guard !apiKey.trimmingCharacters(in: .whitespaces).isEmpty else {
             return .failure(TranscriptionError(message: "Enter an API key first."))
@@ -246,11 +299,32 @@ enum SonioxConnectionTest {
         )
         do {
             let stream = try await provider.start(config: config)
-            await provider.stop()
-            for await event in stream {
-                if case .error(let err) = event { return .failure(err) }
+            await provider.sendAudio(Data(count: 9_600))  // 300 ms of silence
+            Task { await provider.stop() }  // end-of-audio, then teardown
+
+            return await withTaskGroup(of: Result<Void, TranscriptionError>.self) { group in
+                group.addTask {
+                    for await event in stream {
+                        switch event {
+                        case .error(let err): return .failure(err)
+                        case .finished: return .success(())
+                        default: continue
+                        }
+                    }
+                    // Clean close without an error still means the server
+                    // accepted the key and config.
+                    return .success(())
+                }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(10))
+                    return .failure(TranscriptionError(
+                        message: "Timed out waiting for the server — check your network."
+                    ))
+                }
+                defer { group.cancelAll() }
+                return await group.next()
+                    ?? .failure(TranscriptionError(message: "Connection closed unexpectedly."))
             }
-            return .success(())
         } catch {
             return .failure(TranscriptionError(message: error.localizedDescription))
         }
