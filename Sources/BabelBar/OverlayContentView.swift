@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// SwiftUI content of the glass overlay: a reserved top control row (never
-/// overlapping captions), scrollable caption history with each translated
-/// sentence directly under its original, and a status row that is icon-only
-/// except for errors, which show their text.
+/// SwiftUI content of the caption window: scrollable caption history (each
+/// translated sentence directly under its original), an Infuse-style floating
+/// glass control bar at the bottom center (record / pin / settings) that
+/// appears on hover, and a status row that is icon-only except for errors.
+/// The bar and the window's traffic lights fade out together ~1 s after the
+/// mouse leaves.
 struct OverlayContentView: View {
     let model: AppModel
 
@@ -12,71 +14,112 @@ struct OverlayContentView: View {
     @EnvironmentObject var settings: SettingsStore
 
     @State private var hovering = false
+    @State private var chromeVisible = true
     @State private var showSettingsPopover = false
     /// Auto-scroll follows new captions only while the user is at the bottom.
     @State private var stickToBottom = true
 
     var body: some View {
-        VStack(spacing: 0) {
-            controlRow
-                .frame(height: 30)
-            captionArea
-            statusRow
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
+                captionArea
+                statusRow
+            }
+            // Content starts below the (transparent) titlebar so captions
+            // never sit under the traffic lights.
+            .padding(.top, 30)
+
+            controlBar
+                .padding(.bottom, 14)
+                .opacity(chromeVisible ? 1 : 0)
+                .allowsHitTesting(chromeVisible)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.opacity(0.45))
-        // The panel's rounded shape comes from the effect view's maskImage,
-        // which only masks the blur material — clip the SwiftUI layer to the
-        // same radius so the tint and content match it.
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onHover { inside in
-            withAnimation(.easeInOut(duration: 0.15)) { hovering = inside }
+            hovering = inside
+            updateChrome()
+        }
+        .onChange(of: showSettingsPopover) {
+            updateChrome()
+        }
+        .task {
+            // Chrome starts visible for discoverability, then fades if the
+            // mouse isn't over the window.
+            try? await Task.sleep(for: .seconds(2.5))
+            if !hovering && !showSettingsPopover { updateChrome() }
         }
     }
 
-    // MARK: Control row (reserved space; buttons fade in on hover)
+    /// Chrome (glass bar + traffic lights) shows while the mouse is over the
+    /// window or the settings popover is open; it fades in fast (0.2 s) and
+    /// out slow (1 s), traffic lights in lockstep via the window controller.
+    private func updateChrome() {
+        let visible = hovering || showSettingsPopover
+        withAnimation(.easeInOut(duration: visible ? 0.2 : 1.0)) {
+            chromeVisible = visible
+        }
+        model.setWindowChromeVisible(visible)
+    }
 
-    private var controlRow: some View {
-        HStack {
-            Button {
-                model.closeOverlayKeepingSession()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
+    // MARK: Floating glass control bar
+
+    private var controlBar: some View {
+        HStack(spacing: 6) {
+            barButton(
+                symbol: session.isRunning ? "stop.fill" : "record.circle",
+                tint: session.isRunning ? .red : .white.opacity(0.85),
+                help: session.isRunning ? "Stop captions" : "Start captions"
+            ) {
+                session.toggle()
             }
-            .help("Hide overlay (captions keep running)")
-            .accessibilityLabel("Hide overlay")
 
-            Spacer()
+            barButton(
+                symbol: settings.isPinned ? "pin.fill" : "pin",
+                tint: .white.opacity(0.85),
+                help: settings.isPinned ? "Unpin: normal window" : "Pin above all windows"
+            ) {
+                settings.isPinned.toggle()
+            }
 
-            HStack(spacing: 8) {
-                Button {
-                    session.toggle()
-                } label: {
-                    Image(systemName: session.isRunning ? "stop.circle.fill" : "record.circle")
-                        .foregroundStyle(session.isRunning ? Color.red : Color.white.opacity(0.7))
-                }
-                .help(session.isRunning ? "Stop captions" : "Start captions")
-                .accessibilityLabel(session.isRunning ? "Stop captions" : "Start captions")
-
-                Button {
-                    showSettingsPopover.toggle()
-                } label: {
-                    Image(systemName: "gearshape")
-                }
-                .help("Quick settings")
-                .accessibilityLabel("Quick settings")
-                .popover(isPresented: $showSettingsPopover, arrowEdge: .bottom) {
-                    QuickSettingsView()
-                        .environmentObject(settings)
-                }
+            barButton(
+                symbol: "gearshape.fill",
+                tint: .white.opacity(0.85),
+                help: "Settings"
+            ) {
+                showSettingsPopover.toggle()
+            }
+            .popover(isPresented: $showSettingsPopover, arrowEdge: .top) {
+                QuickSettingsView()
+                    .environmentObject(settings)
             }
         }
-        .font(.system(size: 14))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            .ultraThinMaterial,
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.35), radius: 14, y: 4)
+    }
+
+    private func barButton(
+        symbol: String, tint: Color, help: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(tint)
+                .frame(width: 40, height: 32)
+                .contentShape(Rectangle())
+        }
         .buttonStyle(.borderless)
-        .foregroundStyle(.white.opacity(0.7))
-        .padding(.horizontal, 10)
-        .opacity(hovering || showSettingsPopover ? 1 : 0)
-        .animation(.easeInOut(duration: 0.15), value: hovering)
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     // MARK: Captions

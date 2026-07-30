@@ -20,8 +20,6 @@
 	<string>6.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
-	<key>LSUIElement</key>
-	<true/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>NSHighResolutionCapable</key>
@@ -32,5 +30,7 @@
 	<string>BabelBar captures your Mac&#8217;s audio output (not the microphone, no video) to transcribe and translate speech in real time. Audio is streamed to the transcription service and never stored.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>BabelBar captures system audio to provide live captions and translation.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>When you enable microphone capture, BabelBar mixes your microphone with system audio so your own speech is transcribed too.</string>
 </dict>
 </plist>

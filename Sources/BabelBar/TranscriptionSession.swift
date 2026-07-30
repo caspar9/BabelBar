@@ -14,7 +14,7 @@ final class TranscriptionSession: ObservableObject {
     var isRunning: Bool { state.isActive }
 
     private let settings: SettingsStore
-    private let makeAudioSource: () -> AudioSource
+    private let makeAudioSource: (_ withMicrophone: Bool) -> AudioSource
     private let makeProvider: () -> StreamingTranscriptionProvider
 
     private var audioSource: AudioSource?
@@ -36,11 +36,16 @@ final class TranscriptionSession: ObservableObject {
 
     init(
         settings: SettingsStore,
-        makeAudioSource: @escaping () -> AudioSource = { SystemAudioSource() },
+        makeAudioSource: ((_ withMicrophone: Bool) -> AudioSource)? = nil,
         makeProvider: @escaping () -> StreamingTranscriptionProvider = { SonioxProvider() }
     ) {
         self.settings = settings
-        self.makeAudioSource = makeAudioSource
+        self.makeAudioSource = makeAudioSource ?? { withMicrophone in
+            if withMicrophone {
+                return MixedAudioSource()
+            }
+            return SystemAudioSource()
+        }
         self.makeProvider = makeProvider
         self.lastAudibleAt = clock.now
         observeSettings()
@@ -55,7 +60,15 @@ final class TranscriptionSession: ObservableObject {
             return
         }
         guard ScreenRecordingPermission.ensure() else { return }
-        Task { await startSession() }
+        Task {
+            // Mic permission is async (system prompt); fall back to
+            // system-audio-only if denied rather than blocking captions.
+            var withMicrophone = settings.captureMicrophone
+            if withMicrophone {
+                withMicrophone = await MicrophonePermission.ensure()
+            }
+            await startSession(withMicrophone: withMicrophone)
+        }
     }
 
     func stop() {
@@ -67,15 +80,15 @@ final class TranscriptionSession: ObservableObject {
         isRunning ? stop() : start()
     }
 
-    private func startSession() async {
+    private func startSession(withMicrophone: Bool = false) async {
         generation += 1
         let gen = generation
         captions.reset()
         captions.expectsTranslation = settings.transcriptionConfig.translationTarget != nil
         state = .starting
-        Log.session.info("Starting session")
+        Log.session.info("Starting session (microphone: \(withMicrophone))")
 
-        let audioSource = makeAudioSource()
+        let audioSource = makeAudioSource(withMicrophone)
         let provider = makeProvider()
         self.audioSource = audioSource
         self.provider = provider
@@ -178,6 +191,7 @@ final class TranscriptionSession: ObservableObject {
             s.$endpointDetection.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             s.$translationEnabled.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             s.$targetLanguage.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            s.$captureMicrophone.dropFirst().map { _ in () }.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(changes)
             .sink { [weak self] in self?.scheduleRestart() }
@@ -193,7 +207,11 @@ final class TranscriptionSession: ObservableObject {
             try? await Task.sleep(for: .milliseconds(700))
             guard let self, !Task.isCancelled, self.isRunning else { return }
             await self.stopSession(finalState: .restarting)
-            await self.startSession()
+            var withMicrophone = self.settings.captureMicrophone
+            if withMicrophone {
+                withMicrophone = await MicrophonePermission.ensure()
+            }
+            await self.startSession(withMicrophone: withMicrophone)
         }
     }
 }

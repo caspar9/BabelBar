@@ -1,48 +1,71 @@
 import AppKit
 import SwiftUI
 
-/// Borderless, non-activating panel that hosts the caption view over a HUD
-/// glass background. Permanently pinned above everything (including
-/// full-screen apps) and draggable anywhere by its background.
+/// The caption window. One NSPanel, two modes, switched at runtime without
+/// recreating the window (position, content, and scroll state survive):
+///
+/// - **Pinned** (floating): borderless, non-activating, above everything
+///   including full-screen apps, on every Space. Clicking it never steals
+///   focus from the meeting/video app.
+/// - **Normal**: titled window with traffic lights (transparent titlebar,
+///   glass extends edge-to-edge), normal level and Space behavior, appears
+///   in the Window menu and Mission Control.
+///
+/// Closing the window in either mode stops transcription ("window visible =
+/// transcribing"); the delegate reports it via `onUserClosed`.
 @MainActor
-final class OverlayPanelController: NSObject, NSWindowDelegate {
-    private let panel: NSPanel
+final class CaptionWindowController: NSObject, NSWindowDelegate {
+    private let panel: CaptionPanel
+    private let effect = NSVisualEffectView()
     private let settings: SettingsStore
     private var frameSaveDebounce: Timer?
+
+    /// Set by AppModel; called when the user closes the window (red light or ⌘W).
+    var onUserClosed: (() -> Void)?
+
+    /// Mirrors the SwiftUI chrome state so mode switches restore the right
+    /// traffic-light alpha.
+    private var chromeVisible = true
 
     init(model: AppModel, session: TranscriptionSession, settings: SettingsStore) {
         self.settings = settings
 
-        let defaultFrame = NSRect(x: 0, y: 0, width: 640, height: 140)
-        panel = NSPanel(
+        let defaultFrame = NSRect(x: 0, y: 0, width: 640, height: 160)
+        // .titled + .fullSizeContentView in BOTH modes: the glass fills the
+        // whole frame and the (transparent) titlebar overlays it, so the
+        // traffic lights sit embedded in the glass, Infuse-style. Mode
+        // switching only toggles buttons/level/activation — the window is
+        // never rebuilt between borderless and titled, which is exactly the
+        // transition AppKit relayouts unreliably.
+        panel = CaptionPanel(
             contentRect: Self.validatedFrame(settings.loadOverlayFrame()) ?? defaultFrame,
-            styleMask: [.borderless, .nonactivatingPanel, .resizable],
+            styleMask: [.titled, .fullSizeContentView, .resizable, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         super.init()
 
+        panel.title = "BabelBar"
         panel.isFloatingPanel = true
-        panel.level = .statusBar  // always pinned on top
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isMovableByWindowBackground = true
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
-        panel.becomesKeyOnlyIfNeeded = true
         panel.minSize = NSSize(width: 360, height: 100)
+        panel.isReleasedWhenClosed = false
+        // The glass is dark in both modes; a fixed dark appearance keeps
+        // titlebar buttons and popovers legible over it.
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.delegate = self
 
-        // Glass: NSVisualEffectView (.hudWindow, behind-window) below the SwiftUI content.
-        // Rounded corners come from maskImage so the behind-window blur itself is
-        // shaped — a layer cornerRadius clips content but leaves a square blur
-        // region with hard-cut edges.
-        let effect = NSVisualEffectView()
+        // Glass: NSVisualEffectView (.hudWindow, behind-window) below the
+        // SwiftUI content. It fills the entire frame (fullSizeContentView),
+        // and the system's own corner rounding for titled windows clips it —
+        // no manual mask needed.
         effect.material = .hudWindow
         effect.blendingMode = .behindWindow
         effect.state = .active
-        effect.maskImage = .roundedCornerMask(radius: 16)
 
         let content = OverlayContentView(model: model)
             .environmentObject(session)
@@ -66,6 +89,77 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
         if Self.validatedFrame(settings.loadOverlayFrame()) == nil {
             centerNearBottom()
         }
+
+        applyMode(pinned: settings.isPinned)
+    }
+
+    // MARK: Mode switching
+
+    /// Reconfigures the live window in place; position, content, and scroll
+    /// state survive.
+    func applyMode(pinned: Bool) {
+        let wasVisible = panel.isVisible
+
+        if pinned {
+            // Non-activating: clicking captions never steals focus from the
+            // meeting/video app underneath. No visible chrome.
+            panel.styleMask = [.titled, .fullSizeContentView, .resizable, .nonactivatingPanel]
+            panel.isFloatingPanel = true
+            panel.becomesKeyOnlyIfNeeded = true
+            panel.level = .statusBar
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.acceptsActivation = false
+        } else {
+            // A regular window: clicking activates the app, it stacks with
+            // other windows, closes with ⌘W / the red light.
+            panel.styleMask = [
+                .titled, .fullSizeContentView, .resizable, .closable, .miniaturizable,
+            ]
+            panel.isFloatingPanel = false
+            panel.becomesKeyOnlyIfNeeded = false
+            panel.level = .normal
+            panel.collectionBehavior = [.managed, .fullScreenNone]
+            panel.acceptsActivation = true
+        }
+
+        // The titlebar exists in both modes but never draws: content fills
+        // the full frame and the traffic lights (normal mode only) float
+        // embedded over the glass. Re-asserted after every mask change
+        // because AppKit recreates titlebar internals with the mask.
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
+        // A ScrollView in the content would otherwise trigger the automatic
+        // titlebar separator — the telltale opaque-strip look.
+        panel.titlebarSeparatorStyle = .none
+        for buttonType in Self.trafficLights {
+            let button = panel.standardWindowButton(buttonType)
+            button?.isHidden = pinned
+            button?.alphaValue = chromeVisible ? 1 : 0
+        }
+        // Mask changes don't reliably relayout the content under the
+        // titlebar; forcing the frame does.
+        panel.setFrame(panel.frame, display: true)
+
+        if wasVisible {
+            panel.orderFrontRegardless()
+        }
+    }
+
+    private static let trafficLights: [NSWindow.ButtonType] = [
+        .closeButton, .miniaturizeButton, .zoomButton,
+    ]
+
+    /// Fades the traffic lights with the overlay's glass bar: quick in
+    /// (0.2 s), slow out (1 s), matching the SwiftUI animation.
+    func setChromeVisible(_ visible: Bool) {
+        chromeVisible = visible
+        guard !settings.isPinned else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = visible ? 0.2 : 1.0
+            for buttonType in Self.trafficLights {
+                panel.standardWindowButton(buttonType)?.animator().alphaValue = visible ? 1 : 0
+            }
+        }
     }
 
     // MARK: Show / hide
@@ -74,11 +168,28 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
 
     func show() {
         panel.orderFrontRegardless()
+        if !settings.isPinned {
+            NSApp.activate()
+            panel.makeKeyAndOrderFront(nil)
+        }
     }
 
     func hide() {
         panel.orderOut(nil)
     }
+
+    // MARK: NSWindowDelegate
+
+    /// Red light / ⌘W — "window visible = transcribing", so closing stops
+    /// the session. The window is only ordered out (isReleasedWhenClosed is
+    /// false) and can be reopened from the Dock, menu bar, or hotkey.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        onUserClosed?()
+        return true
+    }
+
+    func windowDidMove(_ notification: Notification) { debounceSaveFrame() }
+    func windowDidResize(_ notification: Notification) { debounceSaveFrame() }
 
     // MARK: Frame persistence
 
@@ -104,11 +215,6 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
         ))
     }
 
-    // MARK: NSWindowDelegate — persist frame
-
-    func windowDidMove(_ notification: Notification) { debounceSaveFrame() }
-    func windowDidResize(_ notification: Notification) { debounceSaveFrame() }
-
     private func debounceSaveFrame() {
         frameSaveDebounce?.invalidate()
         frameSaveDebounce = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) {
@@ -121,18 +227,19 @@ final class OverlayPanelController: NSObject, NSWindowDelegate {
     }
 }
 
-extension NSImage {
-    /// Stretchable rounded-rect alpha mask for NSVisualEffectView.maskImage.
-    /// Cap insets keep the corners crisp at any panel size.
-    static func roundedCornerMask(radius: CGFloat) -> NSImage {
-        let edge = radius * 2 + 1
-        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
-            NSColor.black.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-            return true
-        }
-        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-        image.resizingMode = .stretch
-        return image
+/// NSPanel whose key/main eligibility follows the current mode. In pinned
+/// mode it never activates (clicks pass focus through to the app below);
+/// in normal mode it behaves like a regular window.
+private final class CaptionPanel: NSPanel {
+    var acceptsActivation = false
+
+    override var canBecomeKey: Bool {
+        // Key status is needed for text selection and the settings popover
+        // in both modes; .nonactivatingPanel keeps app activation away in
+        // pinned mode.
+        true
     }
+
+    override var canBecomeMain: Bool { acceptsActivation }
 }
+

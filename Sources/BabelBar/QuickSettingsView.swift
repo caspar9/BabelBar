@@ -20,7 +20,9 @@ struct SessionOptionsForm: View {
                     .help("Split captions at natural utterance boundaries.")
             }
 
-            Section("Session") {
+            Section("Audio") {
+                Toggle("Also capture microphone", isOn: $settings.captureMicrophone)
+                    .help("Mix your microphone into the capture so your own speech is transcribed too — useful in meetings.")
                 Toggle("Auto-pause after 30 s of silence", isOn: $settings.autoPauseEnabled)
                     .help("Stops transcription automatically when no audio is playing, so silence doesn't burn API minutes.")
             }
@@ -73,8 +75,10 @@ struct LanguageChips: View {
     }
 }
 
-/// The gear-button popover on the overlay.
+/// The gear-button popover on the overlay's glass bar.
 struct QuickSettingsView: View {
+    @Environment(\.openSettings) private var openSettings
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Session Options")
@@ -83,11 +87,19 @@ struct QuickSettingsView: View {
                 .padding(.top, 12)
             SessionOptionsForm()
                 .scrollContentBackground(.hidden)
-            Text("Changes restart the live session.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 10)
+            HStack {
+                Text("Changes restart the live session.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("All Settings…") {
+                    openSettings()
+                    NSApp.activate()
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
         }
         .frame(width: 340, height: 480)
         // The overlay control bar's styling (white foreground, 14 pt font,

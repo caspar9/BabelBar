@@ -36,10 +36,24 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(apiKey, forKey: "apiKey") }
     }
 
-    // MARK: Auto-pause
+    // MARK: Audio
+
+    /// Mix the microphone into the capture so the user's own speech is
+    /// transcribed alongside system audio.
+    @Published var captureMicrophone: Bool {
+        didSet { defaults.set(captureMicrophone, forKey: "captureMicrophone") }
+    }
 
     @Published var autoPauseEnabled: Bool {
         didSet { defaults.set(autoPauseEnabled, forKey: "autoPauseEnabled") }
+    }
+
+    // MARK: Window mode
+
+    /// Pinned = borderless HUD floating above everything; unpinned = a normal
+    /// titled window. Remembered across launches.
+    @Published var isPinned: Bool {
+        didSet { defaults.set(isPinned, forKey: "windowPinned") }
     }
 
     // MARK: Hotkeys (persisted key code + modifier flags)
@@ -59,7 +73,9 @@ final class SettingsStore: ObservableObject {
         translationEnabled = defaults.object(forKey: "translationEnabled") as? Bool ?? true
         targetLanguage = defaults.string(forKey: "targetLanguage") ?? "zh"
         apiKey = defaults.string(forKey: "apiKey") ?? ""
+        captureMicrophone = defaults.bool(forKey: "captureMicrophone")
         autoPauseEnabled = defaults.bool(forKey: "autoPauseEnabled")
+        isPinned = defaults.object(forKey: "windowPinned") as? Bool ?? true
         toggleAppShortcut = HotkeySpec.load(from: defaults, key: "hotkeyToggleApp")
             ?? HotkeySpec.defaultToggleApp
         toggleRecordingShortcut = HotkeySpec.load(from: defaults, key: "hotkeyToggleRecording")
