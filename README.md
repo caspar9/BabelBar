@@ -22,6 +22,7 @@ make build     # release build → ad-hoc signed dist/BabelBar.app
 make run       # build + open the app
 make install   # copy to /Applications
 make dmg       # drag-to-install disk image → dist/BabelBar-<version>.dmg
+make icon      # re-render Resources/AppIcon.icns from Resources/icon/make-icon.swift
 make clean
 swift test     # unit tests (CaptionModel)
 ```
