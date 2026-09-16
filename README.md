@@ -56,8 +56,8 @@ with `make SIGN_ID="Developer ID Application: …"` to avoid this.
 
 ### The caption window
 
-Hover to reveal a floating glass control bar: **record/stop**, **pin**, and
-**gear** (session options popover). Drag the window by its background, resize
+Hover to reveal a compact glass control bar in the top-right corner:
+**record/stop**, **pin**, and **gear** (session options popover). Drag the window by its background, resize
 from any edge; position and size are remembered. Captions are selectable text.
 
 The window has two modes, toggled with the pin button or ⇧⌘P:
@@ -73,8 +73,8 @@ visible = transcribing*. Reopen it from the Dock icon or the hotkey.
 
 ### Captions
 
-Original speech on top, translation directly beneath each sentence (default
-target: Chinese `zh`). Dimmer text is provisional and firms up as the
+Original speech in white on top, translation in amber directly beneath each
+sentence (default target: Chinese `zh`). Dimmer text is provisional and firms up as the
 recognizer finalizes it. With diarization on, each block gets a colored speaker
 chip. History scrolls back up to 50 sentences; a chevron appears when you've
 scrolled away from the live caption.

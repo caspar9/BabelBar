@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// SwiftUI content of the caption window: scrollable caption history (each
-/// translated sentence directly under its original), an Infuse-style floating
-/// glass control bar at the bottom center (record / pin / settings) that
-/// appears on hover, and a status row that is icon-only except for errors.
+/// translated sentence directly under its original), a compact floating glass
+/// control bar in the top-right corner (record / pin / settings) that appears
+/// on hover, and a status row that is icon-only except for errors.
 /// The bar and the window's traffic lights fade out together ~1 s after the
 /// mouse leaves.
 struct OverlayContentView: View {
@@ -20,21 +20,31 @@ struct OverlayContentView: View {
     @State private var stickToBottom = true
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        ZStack(alignment: .topTrailing) {
             VStack(spacing: 0) {
                 captionArea
                 statusRow
             }
             // Content starts below the (transparent) titlebar so captions
-            // never sit under the traffic lights.
+            // never sit under the traffic lights or the control bar.
             .padding(.top, 30)
 
+            // Top-right, inside the titlebar band: out of the reading line
+            // (captions grow from the bottom) and mirroring the traffic
+            // lights at top-left in normal mode.
+            // 26 pt tall; top inset 3 centers it on the traffic lights' axis
+            // (~16 pt from the top edge).
             controlBar
-                .padding(.bottom, 14)
+                .padding(.top, 3)
+                .padding(.trailing, 7)
                 .opacity(chromeVisible ? 1 : 0)
                 .allowsHitTesting(chromeVisible)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // The transparent titlebar is reported as a top safe-area inset,
+        // which would push everything down by another titlebar height. We
+        // lay out relative to the window's true top edge instead.
+        .ignoresSafeArea(.container, edges: .top)
         .background(Color.black.opacity(0.45))
         .onHover { inside in
             hovering = inside
@@ -89,22 +99,22 @@ struct OverlayContentView: View {
             ) {
                 showSettingsPopover.toggle()
             }
-            .popover(isPresented: $showSettingsPopover, arrowEdge: .top) {
+            .popover(isPresented: $showSettingsPopover, arrowEdge: .bottom) {
                 QuickSettingsView()
                     .environmentObject(settings)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
         .background(
             .ultraThinMaterial,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .strokeBorder(.white.opacity(0.12), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.35), radius: 14, y: 4)
+        .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
     }
 
     private func barButton(
@@ -112,9 +122,9 @@ struct OverlayContentView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 16, weight: .medium))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(tint)
-                .frame(width: 40, height: 32)
+                .frame(width: 30, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
@@ -273,6 +283,18 @@ private struct ContentBottomKey: PreferenceKey {
     }
 }
 
+// MARK: - Caption colors
+
+/// Original speech vs. its translation are told apart by color, not size:
+/// white for what was said, warm amber for the translation. Both were tuned
+/// against the dark HUD glass (~45% black over blur) for contrast.
+private enum CaptionPalette {
+    static let original = Color.white.opacity(0.96)
+    /// Amber rather than pure orange: less saturated on dark glass, still
+    /// unmistakably "the other line".
+    static let translation = Color(red: 1.0, green: 0.74, blue: 0.36)
+}
+
 // MARK: - One sentence block: original + its translation, kept together
 
 private struct SegmentView: View {
@@ -286,16 +308,18 @@ private struct SegmentView: View {
                 speakerChip(speaker)
             }
 
-            // Original line
-            (finalText(segment.originalFinal, size: 17, weight: .medium)
-                + partialText(segment.originalPartial, size: 17, weight: .medium))
+            // Original line: white, medium weight.
+            (finalText(segment.originalFinal, size: 17, weight: .medium, color: CaptionPalette.original)
+                + partialText(segment.originalPartial, size: 17, weight: .medium, color: CaptionPalette.original))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
 
+            // Translation line: warm amber, semibold — reads as a distinct
+            // layer from the original at a glance, without competing in size.
             if showTranslation && hasTranslation {
                 Divider().opacity(0.2)
-                (finalText(segment.translationFinal, size: 16, weight: .regular, opacity: 0.85)
-                    + partialText(segment.translationPartial, size: 16, weight: .regular))
+                (finalText(segment.translationFinal, size: 16, weight: .semibold, color: CaptionPalette.translation)
+                    + partialText(segment.translationPartial, size: 16, weight: .semibold, color: CaptionPalette.translation))
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
@@ -319,22 +343,23 @@ private struct SegmentView: View {
     }
 
     private func finalText(
-        _ s: String, size: CGFloat, weight: Font.Weight, opacity: Double = 1
+        _ s: String, size: CGFloat, weight: Font.Weight, color: Color
     ) -> Text {
         Text(s)
             .font(.system(size: size, weight: weight))
-            .foregroundStyle(.white.opacity(opacity))
+            .foregroundStyle(color)
     }
 
     /// Provisional tokens render dimmer so updates feel fluid, not flickery.
-    private func partialText(_ s: String, size: CGFloat, weight: Font.Weight) -> Text {
+    private func partialText(_ s: String, size: CGFloat, weight: Font.Weight, color: Color) -> Text {
         Text(s)
             .font(.system(size: size, weight: weight))
-            .foregroundStyle(.white.opacity(0.55))
+            .foregroundStyle(color.opacity(0.55))
     }
 
     private func speakerColor(_ speaker: String) -> Color {
-        let palette: [Color] = [.cyan, .orange, .green, .pink, .yellow, .purple]
+        // No orange/yellow here: those are reserved for the translation line.
+        let palette: [Color] = [.cyan, .mint, .green, .pink, .indigo, .purple]
         let idx = (Int(speaker) ?? abs(speaker.hashValue)) % palette.count
         return palette[abs(idx)]
     }

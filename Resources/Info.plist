@@ -2,37 +2,37 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>BabelBar</string>
 	<key>CFBundleDisplayName</key>
 	<string>BabelBar</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.babelbar.app</string>
 	<key>CFBundleExecutable</key>
 	<string>BabelBar</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.babelbar.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>BabelBar</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>1.1</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
+	<string>2</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>BabelBar captures system audio to provide live captions and translation.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>When you enable microphone capture, BabelBar mixes your microphone with system audio so your own speech is transcribed too.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>BabelBar captures your Mac&#8217;s audio output (not the microphone, no video) to transcribe and translate speech in real time. Audio is streamed to the transcription service and never stored.</string>
-	<key>NSAudioCaptureUsageDescription</key>
-	<string>BabelBar captures system audio to provide live captions and translation.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>When you enable microphone capture, BabelBar mixes your microphone with system audio so your own speech is transcribed too.</string>
+	<string>BabelBar captures your Mac’s audio output (not the microphone, no video) to transcribe and translate speech in real time. Audio is streamed to the transcription service and never stored.</string>
 </dict>
 </plist>

@@ -39,6 +39,34 @@ struct SessionOptionsForm: View {
             }
         }
         .formStyle(.grouped)
+        .toggleStyle(AccentSwitchStyle())
+    }
+}
+
+/// A switch that is always drawn in the accent color when on. The system
+/// switch renders grey whenever the app is inactive — which is permanently
+/// the case for the non-activating pinned caption window and its popover —
+/// so on/off became hard to tell apart. Drawing it ourselves sidesteps that.
+struct AccentSwitchStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack {
+            configuration.label
+            Spacer()
+            Capsule()
+                .fill(configuration.isOn ? Color.accentColor : Color.primary.opacity(0.22))
+                .frame(width: 38, height: 22)
+                .overlay(alignment: configuration.isOn ? .trailing : .leading) {
+                    Circle()
+                        .fill(.white)
+                        .shadow(color: .black.opacity(0.25), radius: 1, y: 1)
+                        .padding(2)
+                }
+                .animation(.easeInOut(duration: 0.15), value: configuration.isOn)
+                .contentShape(Capsule())
+                .onTapGesture { configuration.isOn.toggle() }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityValue(configuration.isOn ? "On" : "Off")
+        }
     }
 }
 
