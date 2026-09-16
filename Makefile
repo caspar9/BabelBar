@@ -2,7 +2,11 @@ APP_NAME   := BabelBar
 DIST       := dist
 APP        := $(DIST)/$(APP_NAME).app
 BINARY     := .build/release/$(APP_NAME)
-SIGN_ID    := -
+# Signing identity. Prefers the local self-signed "BabelBar Dev" identity
+# (create it once with `make cert`) so Screen Recording / Keychain grants
+# survive rebuilds; falls back to ad-hoc. Override: make SIGN_ID="…".
+DEV_ID     := BabelBar Dev
+SIGN_ID    ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -q '"$(DEV_ID)"' && echo '$(DEV_ID)' || echo -)
 VERSION    := $(shell /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
 DMG        := $(DIST)/$(APP_NAME)-$(VERSION).dmg
 DMG_STAGE  := $(DIST)/dmg-stage
@@ -11,7 +15,12 @@ ICON       := Resources/AppIcon.icns
 ICON_SRC   := Resources/icon/make-icon.swift
 ICONSET    := $(DIST)/AppIcon.iconset
 
-.PHONY: build compile run install dmg icon clean
+.PHONY: build compile run install dmg icon cert clean
+
+# One-time: create the local self-signed signing identity. See the script
+# header for why this matters (stable TCC / Keychain grants across rebuilds).
+cert:
+	scripts/make-dev-cert.sh "$(DEV_ID)"
 
 # `build` produces a signed .app bundle in dist/
 build: compile
@@ -22,7 +31,7 @@ build: compile
 	cp "$(ICON)" "$(APP)/Contents/Resources/AppIcon.icns"
 	printf 'APPL????' > "$(APP)/Contents/PkgInfo"
 	codesign --force --deep --sign "$(SIGN_ID)" "$(APP)"
-	@echo "Built $(APP)"
+	@echo "Built $(APP) (signed as: $(SIGN_ID))"
 
 compile:
 	swift build -c release

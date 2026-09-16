@@ -18,7 +18,8 @@ sudo xcode-select -s /Applications/Xcode.app
 Then:
 
 ```sh
-make build     # release build → ad-hoc signed dist/BabelBar.app
+make cert      # one-time: create a local self-signed signing identity (see below)
+make build     # release build → signed dist/BabelBar.app
 make run       # build + open the app
 make install   # copy to /Applications
 make dmg       # drag-to-install disk image → dist/BabelBar-<version>.dmg
@@ -27,16 +28,32 @@ make clean
 swift test     # unit tests (CaptionModel)
 ```
 
-To install on another Mac, open the DMG and drag BabelBar to Applications. Ad-hoc
-signed builds are not notarized, so the first launch there needs right-click →
+To install on another Mac, open the DMG and drag BabelBar to Applications. These
+builds are not notarized, so the first launch there needs right-click →
 **Open** (or `xattr -d com.apple.quarantine /Applications/BabelBar.app`).
 
 No third-party dependencies; plain Swift Package Manager.
 
-Note on signing: `make build` signs ad hoc, so every rebuild is a "new" app to
-macOS. The first launch after a rebuild asks once for Keychain access (the API
-key lives there) and may re-prompt for Screen Recording. Pass a stable identity
-with `make SIGN_ID="Developer ID Application: …"` to avoid this.
+### Signing — run `make cert` once
+
+macOS remembers permission grants (Screen Recording, Microphone) by the app's
+code-signing *designated requirement*. Without a
+certificate, `codesign` signs ad hoc and that requirement is the binary's own
+hash — so **every rebuild invalidates every permission you granted**, and the
+Screen Recording prompt comes back each time.
+
+`make cert` creates a self-signed code-signing certificate ("BabelBar Dev") in
+your login keychain (macOS may ask for your password once to trust it). The
+Makefile picks it up automatically; the requirement becomes *bundle ID +
+certificate*, which is stable across rebuilds. If you already granted Screen
+Recording to an ad-hoc build, clear the stale entry so the system prompts
+cleanly for the new signature:
+
+```sh
+tccutil reset ScreenCapture com.babelbar.app
+```
+
+To sign with a real Developer ID instead: `make SIGN_ID="Developer ID Application: …"`.
 
 ## First-time setup
 
@@ -44,7 +61,8 @@ with `make SIGN_ID="Developer ID Application: …"` to avoid this.
    Dock icon and main menu.
 2. Open **Settings** (⌘, or the gear on the caption window → **All Settings…**)
    → **Account**: paste your Soniox API key and hit **Test Connection**. The key
-   is stored in the macOS Keychain, never in plain text.
+   is stored with the app's other settings (in its preferences file, not the
+   Keychain — simpler, though not encrypted).
 3. Press the record button on the caption window (or **Start Captions** in the
    View menu). On first start macOS asks for **Screen Recording** permission —
    needed for system-audio capture; no video is recorded. Enable BabelBar under
@@ -124,8 +142,8 @@ Layers depend downward only: audio, provider, and session know nothing about
 windows. Swapping STT vendors means writing one new
 `StreamingTranscriptionProvider`; the UI and caption logic are untouched.
 
-Settings persist in UserDefaults except the API key, which is in the Keychain.
-Logs go to the unified log under subsystem `com.babelbar.app`:
+All settings, the API key included, persist in UserDefaults
+(`~/Library/Preferences/com.babelbar.app.plist`). Logs go to the unified log under subsystem `com.babelbar.app`:
 
 ```sh
 log stream --predicate 'subsystem == "com.babelbar.app"'

@@ -1,7 +1,10 @@
 import Foundation
 import Security
 
-/// Minimal Keychain wrapper for the STT API key.
+/// Read-and-delete access to the Keychain item that versions 1.0–1.1 used
+/// for the API key. Kept only for the one-time migration back into
+/// UserDefaults (see `SettingsStore.migrateAPIKeyFromKeychain`); nothing
+/// writes here anymore.
 enum Keychain {
     private static let service = "com.babelbar.app"
     private static let account = "soniox-api-key"
@@ -18,21 +21,8 @@ enum Keychain {
         return key
     }
 
-    static func saveAPIKey(_ key: String) {
-        if key.isEmpty {
-            SecItemDelete(baseQuery as CFDictionary)
-            return
-        }
-        let data = Data(key.utf8)
-        let status = SecItemUpdate(
-            baseQuery as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        )
-        if status == errSecItemNotFound {
-            var add = baseQuery
-            add[kSecValueData as String] = data
-            SecItemAdd(add as CFDictionary, nil)
-        }
+    static func deleteAPIKey() {
+        SecItemDelete(baseQuery as CFDictionary)
     }
 
     private static var baseQuery: [String: Any] {

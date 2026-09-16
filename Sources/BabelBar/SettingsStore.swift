@@ -1,9 +1,10 @@
 import SwiftUI
 import Combine
 
-/// Single source of truth for user settings. The overlay popover and the
-/// Settings window both bind here. Session options are persisted in
-/// UserDefaults; the API key lives in the Keychain.
+/// Single source of truth for user settings, persisted in UserDefaults —
+/// including the API key: a deliberate simplicity-over-security trade-off,
+/// since the Keychain (and its access prompts) confuses many users.
+/// The overlay popover and the Settings window both bind here.
 @MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
@@ -31,10 +32,10 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(targetLanguage, forKey: "targetLanguage") }
     }
 
-    // MARK: API key (Keychain-backed; never written to UserDefaults)
+    // MARK: API key
 
     @Published var apiKey: String {
-        didSet { Keychain.saveAPIKey(apiKey) }
+        didSet { defaults.set(apiKey, forKey: "apiKey") }
     }
 
     // MARK: Audio
@@ -73,7 +74,7 @@ final class SettingsStore: ObservableObject {
         endpointDetection = defaults.object(forKey: "endpointDetection") as? Bool ?? true
         translationEnabled = defaults.object(forKey: "translationEnabled") as? Bool ?? true
         targetLanguage = defaults.string(forKey: "targetLanguage") ?? "zh"
-        apiKey = Keychain.loadAPIKey()
+        apiKey = defaults.string(forKey: "apiKey") ?? ""
         captureMicrophone = defaults.bool(forKey: "captureMicrophone")
         autoPauseEnabled = defaults.bool(forKey: "autoPauseEnabled")
         isPinned = defaults.object(forKey: "windowPinned") as? Bool ?? true
@@ -81,17 +82,19 @@ final class SettingsStore: ObservableObject {
             ?? HotkeySpec.defaultToggleApp
         toggleRecordingShortcut = HotkeySpec.load(from: defaults, key: "hotkeyToggleRecording")
             ?? HotkeySpec.defaultToggleRecording
-        migrateAPIKeyFromDefaults()
+        migrateAPIKeyFromKeychain()
     }
 
-    /// Earlier builds kept the key in UserDefaults (plain text in the prefs
-    /// plist). Move it into the Keychain once and scrub the plist entry.
-    private func migrateAPIKeyFromDefaults() {
-        guard let legacy = defaults.string(forKey: "apiKey") else { return }
-        if apiKey.isEmpty, !legacy.isEmpty {
-            apiKey = legacy  // didSet persists to the Keychain
-        }
-        defaults.removeObject(forKey: "apiKey")
+    /// Versions 1.0–1.1 kept the key in the Keychain. Bring it back into
+    /// UserDefaults once so upgrading users don't have to re-enter it, then
+    /// remove the Keychain item. (Reading it may trigger one Keychain access
+    /// prompt if the app's signature changed since the item was written.)
+    private func migrateAPIKeyFromKeychain() {
+        guard apiKey.isEmpty else { return }
+        let legacy = Keychain.loadAPIKey()
+        guard !legacy.isEmpty else { return }
+        apiKey = legacy  // didSet persists to UserDefaults
+        Keychain.deleteAPIKey()
     }
 
     /// Snapshot used to (re)start a transcription session.
