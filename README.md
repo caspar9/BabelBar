@@ -21,9 +21,14 @@ Then:
 make build     # release build → ad-hoc signed dist/BabelBar.app
 make run       # build + open the app
 make install   # copy to /Applications
+make dmg       # drag-to-install disk image → dist/BabelBar-<version>.dmg
 make clean
 swift test     # unit tests (CaptionModel)
 ```
+
+To install on another Mac, open the DMG and drag BabelBar to Applications. Ad-hoc
+signed builds are not notarized, so the first launch there needs right-click →
+**Open** (or `xattr -d com.apple.quarantine /Applications/BabelBar.app`).
 
 No third-party dependencies; plain Swift Package Manager.
 
