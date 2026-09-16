@@ -125,7 +125,7 @@ final class MixedAudioSource: AudioSource {
 
     private static func mix(_ systemChunk: Data, microphone: MicrophoneCapture) -> Data {
         var mixed = [Int16](repeating: 0, count: systemChunk.count / 2)
-        mixed.withUnsafeMutableBytes { systemChunk.copyBytes(to: $0) }
+        _ = mixed.withUnsafeMutableBytes { systemChunk.copyBytes(to: $0) }
 
         let mic = microphone.popSamples(mixed.count)
         guard !mic.isEmpty else { return systemChunk }

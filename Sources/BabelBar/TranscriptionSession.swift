@@ -59,7 +59,15 @@ final class TranscriptionSession: ObservableObject {
             state = .needsAPIKey
             return
         }
-        guard ScreenRecordingPermission.ensure() else { return }
+        // Claim the session synchronously: `isRunning` must flip before the
+        // first suspension point (permission alerts, mic prompt) so a second
+        // start() — e.g. the hotkey pressed twice — is rejected instead of
+        // opening a parallel session whose connection would leak.
+        state = .starting
+        guard ScreenRecordingPermission.ensure() else {
+            state = .idle
+            return
+        }
         Task {
             // Mic permission is async (system prompt); fall back to
             // system-audio-only if denied rather than blocking captions.
@@ -96,14 +104,20 @@ final class TranscriptionSession: ObservableObject {
         do {
             let eventStream = try await provider.start(config: settings.transcriptionConfig)
             let audioStream = try await audioSource.start()
-            guard gen == generation else { return }
+            guard gen == generation else {
+                // Superseded (stop/restart) while connecting: release what
+                // this attempt opened instead of leaving capture running.
+                await audioSource.stop()
+                await provider.stop()
+                return
+            }
 
             state = .running
 
             eventTask = Task { [weak self] in
                 for await event in eventStream {
                     guard let self, self.generation == gen else { return }
-                    self.handle(event)
+                    await self.handle(event)
                 }
             }
 
@@ -146,14 +160,21 @@ final class TranscriptionSession: ObservableObject {
         }
     }
 
-    private func handle(_ event: TranscriptEvent) {
+    private func handle(_ event: TranscriptEvent) async {
         switch event {
         case .connected:
             state = .running
         case .reconnecting(let attempt):
             state = .reconnecting(attempt: attempt)
         case .error(let err):
-            state = .error(err.message)
+            // Provider errors are terminal (fatal server error or reconnects
+            // exhausted). Tear the whole session down — otherwise capture
+            // keeps running with nowhere to send audio, the screen-recording
+            // and microphone indicators stay lit, and stop() is a no-op
+            // because `.error` is not an active state.
+            captions.apply(event)
+            await stopSession(finalState: .error(err.message))
+            return
         default:
             break
         }

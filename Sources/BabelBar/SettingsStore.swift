@@ -1,8 +1,9 @@
 import SwiftUI
 import Combine
 
-/// Single source of truth for user settings, persisted in UserDefaults.
-/// The overlay popover and the Settings window both bind here.
+/// Single source of truth for user settings. The overlay popover and the
+/// Settings window both bind here. Session options are persisted in
+/// UserDefaults; the API key lives in the Keychain.
 @MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
@@ -30,10 +31,10 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(targetLanguage, forKey: "targetLanguage") }
     }
 
-    // MARK: API key
+    // MARK: API key (Keychain-backed; never written to UserDefaults)
 
     @Published var apiKey: String {
-        didSet { defaults.set(apiKey, forKey: "apiKey") }
+        didSet { Keychain.saveAPIKey(apiKey) }
     }
 
     // MARK: Audio
@@ -72,7 +73,7 @@ final class SettingsStore: ObservableObject {
         endpointDetection = defaults.object(forKey: "endpointDetection") as? Bool ?? true
         translationEnabled = defaults.object(forKey: "translationEnabled") as? Bool ?? true
         targetLanguage = defaults.string(forKey: "targetLanguage") ?? "zh"
-        apiKey = defaults.string(forKey: "apiKey") ?? ""
+        apiKey = Keychain.loadAPIKey()
         captureMicrophone = defaults.bool(forKey: "captureMicrophone")
         autoPauseEnabled = defaults.bool(forKey: "autoPauseEnabled")
         isPinned = defaults.object(forKey: "windowPinned") as? Bool ?? true
@@ -80,6 +81,17 @@ final class SettingsStore: ObservableObject {
             ?? HotkeySpec.defaultToggleApp
         toggleRecordingShortcut = HotkeySpec.load(from: defaults, key: "hotkeyToggleRecording")
             ?? HotkeySpec.defaultToggleRecording
+        migrateAPIKeyFromDefaults()
+    }
+
+    /// Earlier builds kept the key in UserDefaults (plain text in the prefs
+    /// plist). Move it into the Keychain once and scrub the plist entry.
+    private func migrateAPIKeyFromDefaults() {
+        guard let legacy = defaults.string(forKey: "apiKey") else { return }
+        if apiKey.isEmpty, !legacy.isEmpty {
+            apiKey = legacy  // didSet persists to the Keychain
+        }
+        defaults.removeObject(forKey: "apiKey")
     }
 
     /// Snapshot used to (re)start a transcription session.
